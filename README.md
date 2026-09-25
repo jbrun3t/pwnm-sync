@@ -92,6 +92,11 @@ tag and its state tag stays as it was last set.
 Run with `--dry-run` to see what would change without writing to
 patchwork, notmuch or the sync database.
 
+To sync only some patches, archived or not, name them with `--patch-id`
+or `--msgid` (both repeatable). Add `--from patchwork` to apply the
+patchwork state to the message, or `--from notmuch` to push the message's
+state tag, whichever side moved.
+
 LICENSE
 =======
 

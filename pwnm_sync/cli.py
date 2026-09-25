@@ -107,25 +107,59 @@ def load_config(ctx, param, path):
     is_flag=True,
     help="Print what would change, without writing to patchwork, notmuch or the syncdb",
 )
-def main(notmuch_database, syncdb, patchwork_token, patchwork_url, sync, dry_run):
+@click.option(
+    "--patch-id",
+    "patch_ids",
+    type=int,
+    multiple=True,
+    help="Sync only this patchwork patch. Repeatable.",
+)
+@click.option(
+    "--msgid",
+    "msgids",
+    multiple=True,
+    help="Sync only the patches of this message-id. Repeatable.",
+)
+@click.option(
+    "--from",
+    "source",
+    type=click.Choice(["patchwork", "notmuch"]),
+    help="With --patch-id or --msgid: take this side's state, whichever side moved.",
+)
+def main(
+    notmuch_database,
+    syncdb,
+    patchwork_token,
+    patchwork_url,
+    sync,
+    dry_run,
+    patch_ids,
+    msgids,
+    source,
+):
     """Sync patch state between Patchwork and Notmuch."""
+    if source and not (patch_ids or msgids):
+        raise click.UsageError("--from needs --patch-id or --msgid")
     nmdb = os.path.expanduser(notmuch_database)
     api_url = f"{patchwork_url.rstrip('/')}/api/{API_VERSION}"
 
     try:
         open_store(syncdb, dry_run=dry_run)
-        with database.atomic() as transaction:
-            for project in sync.split(","):
-                project_name = project.split("=")[0]
-                client = Client(
-                    Patchwork(api_url, project_name),
-                    token=patchwork_token,
-                    dry_run=dry_run,
-                )
-                project_id = client.project_data()["id"]
+        clients = {}
+        for project in sync.split(","):
+            name = project.split("=")[0]
+            clients[name] = Client(Patchwork(api_url, name), token=patchwork_token, dry_run=dry_run)
+            clients[name].project_data()
 
-                click.echo(f"Looking at project {project_name} (id {project_id})")
-                sync_project(client, nmdb, project_name, dry_run)
+        with database.atomic() as transaction:
+            if patch_ids or msgids:
+                patches = find_patches(clients, patch_ids, msgids)
+                with open_notmuch(nmdb, dry_run) as db, db.atomic():
+                    for project, patch in patches:
+                        sync_patch(clients[project], db, project, patch, dry_run, source)
+            else:
+                for name, client in clients.items():
+                    sync_project(client, nmdb, name, dry_run)
 
             if dry_run:
                 transaction.rollback()
@@ -133,21 +167,52 @@ def main(notmuch_database, syncdb, patchwork_token, patchwork_url, sync, dry_run
         raise click.ClickException(str(e)) from e
 
 
+def open_notmuch(path, dry_run):
+    mode = notmuch2.Database.MODE.READ_ONLY if dry_run else notmuch2.Database.MODE.READ_WRITE
+    return notmuch2.Database(path, mode=mode)
+
+
+def find_patches(clients, patch_ids, msgids):
+    """Fetch the patches named on the command line from the synced projects holding them."""
+    found = []
+    for patch_id in patch_ids:
+        errors = []
+        for project, client in clients.items():
+            try:
+                found.append((project, client.patch_data(patch_id)))
+                break
+            except PwError as e:
+                errors.append(str(e))
+        else:
+            raise Error(f"patch {patch_id}: {'; '.join(errors)}")
+
+    for msgid in msgids:
+        patches = [
+            (project, patch)
+            for project, client in clients.items()
+            for patch in client.patch_list(msgid=msgid.strip("<>"))
+        ]
+        if not patches:
+            raise Error(f"<{msgid}>: no patch in {', '.join(clients)}")
+        found += patches
+    return found
+
+
 def sync_project(client, nmdb, project, dry_run):
     """Sync the project's unarchived patches; the others leave the sync, tagged archived."""
-    mode = notmuch2.Database.MODE.READ_ONLY if dry_run else notmuch2.Database.MODE.READ_WRITE
+    click.echo(f"Looking at project {project}")
     listed = set()
     for batch in itertools.batched(client.patch_list(archived=False), BATCH):
         # We open the DB for each batch as to not hold the notmuch
         # database open blocking other writers for too long.
-        with notmuch2.Database(nmdb, mode=mode) as db, db.atomic():
+        with open_notmuch(nmdb, dry_run) as db, db.atomic():
             for patch in batch:
                 listed.add(patch["id"])
                 sync_patch(client, db, project, patch, dry_run)
 
     gone = [row for row in Patch.select().where(Patch.project == project) if row.id not in listed]
     if gone:
-        with notmuch2.Database(nmdb, mode=mode) as db, db.atomic():
+        with open_notmuch(nmdb, dry_run) as db, db.atomic():
             for row in gone:
                 click.echo(f"patch {row.id}: leaves the sync")
                 try:
@@ -161,10 +226,10 @@ def sync_project(client, nmdb, project, dry_run):
     click.echo(f"Finished processing {len(listed)} {project} patches!")
 
 
-def sync_patch(client, db, project, patch, dry_run):
-    """Carry over whichever side moved since the last run.
+def sync_patch(client, db, project, patch, dry_run, source=None):
+    """Carry over whichever side moved since the last run, or the `source` side when given.
 
-    Patchwork wins when both did, or when the local state tags are ambiguous.
+    Patchwork wins when both moved, or when the local state tags are ambiguous.
     """
     msgid = patch["msgid"][1:-1]
     try:
@@ -175,21 +240,28 @@ def sync_patch(client, db, project, patch, dry_run):
 
     row = Patch.get_or_none(Patch.id == patch["id"])
     state = patch["state"]
-    if row and state == row.state:
+    tagged = {s for s in STATES if f"pw-{project}-{s}" in msg.tags}
+    if source == "notmuch":
+        if len(tagged) != 1:
+            click.echo(f"patch {patch['id']} <{msgid}>: tagged {sorted(tagged)} - cannot push")
+            return
+        local = tagged - {state}
+    elif source is None and row and state == row.state:
         # Patchwork did not move: a state tag other than the agreed one is a local change
-        local = {s for s in STATES if f"pw-{project}-{s}" in msg.tags} - {row.state}
-        if len(local) > 1:
-            click.echo(
-                f"patch {patch['id']} <{msgid}>: tagged {sorted(local)} - taking patchwork's"
-            )
-        elif local:
-            state = local.pop()
-            click.echo(f"patch {patch['id']} <{msgid}>: patchwork {row.state} -> {state}")
-            try:
-                client.update(patch["id"], state=state)
-            except PwError as e:
-                click.echo(f"ERROR {e} - are you maintainer of {project}?")
-                return
+        local = tagged - {row.state}
+    else:
+        local = set()
+
+    if len(local) > 1:
+        click.echo(f"patch {patch['id']} <{msgid}>: tagged {sorted(local)} - taking patchwork's")
+    elif local:
+        state = local.pop()
+        click.echo(f"patch {patch['id']} <{msgid}>: patchwork {patch['state']} -> {state}")
+        try:
+            client.update(patch["id"], state=state)
+        except PwError as e:
+            click.echo(f"ERROR {e} - are you maintainer of {project}?")
+            return
 
     retag(msg, project, state, patch["archived"], dry_run)
     Patch.replace(id=patch["id"], project=project, msgid=msgid, state=state).execute()
