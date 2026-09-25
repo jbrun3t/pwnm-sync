@@ -1,1 +1,2 @@
+notmuch2
 requests-futures

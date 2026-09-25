@@ -20,7 +20,7 @@
 
 import sys
 import datetime
-import notmuch
+import notmuch2
 import sqlite3
 import argparse
 import os
@@ -52,11 +52,11 @@ def main():
         }
 
     if not os.path.isfile(args.config_file):
-        print("Config file {} not found!".format(args.config_file))
+        print(f"Config file {args.config_file} not found!")
         args.config_file = None
 
     if args.config_file:
-        config = configparser.SafeConfigParser()
+        config = configparser.ConfigParser()
         config.read([args.config_file])
         config_values = dict(config.items("Defaults"))
         defaults = {**defaults, **config_values}
@@ -81,8 +81,6 @@ def main():
                       help="Only consider patches on or after this date")
 
     args = argp.parse_args(remaining_argv)
-    print(args)
-
 
     pw_token = args.patchwork_token
     nmdb = os.path.expanduser(args.notmuch_database)
@@ -106,28 +104,25 @@ def main():
     conn.commit()
 
     s = FuturesSession()
-    s.headers.update({ 'Authorization': 'Token {}'.format(pw_token) })
+    s.headers.update({'Authorization': f'Token {pw_token}'})
 
     patchwork_url = patchwork_login(s, args.patchwork_url)
     projects = get_projects(s, patchwork_url)
-    #print(repr(projects))
 
     for project in args.sync.split(","):
         project_name, project_list = project.split("=")
         if project_name not in projects:
-            raise Exception("ERROR couldn't find project '%s'" % project_name)
+            raise Exception(f"ERROR couldn't find project '{project_name}'")
 
-        print("Looking at project {} (id {})".format(project_name,projects[project_name]))
-        db = notmuch.Database(nmdb)
+        print(f"Looking at project {project_name} (id {projects[project_name]})")
+        with notmuch2.Database(nmdb) as db:
+            if args.epoch is None:
+                oldest_msg = get_oldest_nm_message(db, project_list)
+            else:
+                oldest_msg = args.epoch
 
-        if args.epoch is None:
-            oldest_msg = get_oldest_nm_message(db, project_list)
-        else:
-            oldest_msg = args.epoch
-
-        print("Going to look at things post {}".format(oldest_msg))
-        populate_nm_patch_status(db,conn,project_name,all_my_tags)
-        db.close() # close the read-only session
+            print(f"Going to look at things post {oldest_msg}")
+            populate_nm_patch_status(db,conn,project_name,all_my_tags)
 
         # we now have a map of project names to IDs, so we can use that.
         process_pw_patches_for_project(s, nmdb, conn, patchwork_url, project_name, projects[project_name], oldest_msg)
@@ -158,24 +153,10 @@ def main():
 
         conn.commit()
 
-    #print(json.dumps(r.json(), indent=2))
-
 
 def get_oldest_nm_message(db, project_list):
-    pw_list = 'to:{}'.format(project_list)
-    qstr = pw_list
-    #qstr = qstr + ' and not (tag:{}'.format(all_my_tags[0])
-    #for t in all_my_tags[1:]:
-    #    qstr = qstr + ' or tag:{}'.format(t)
-    #qstr = qstr + ')'
-    q = notmuch.Query(db, qstr)
-
-    #q.exclude_tag('pwsync')
-    q.set_sort(notmuch.Query.SORT.OLDEST_FIRST)
-    #q.set_sort(notmuch.Query.SORT.NEWEST_FIRST)
-    msgs = q.search_messages()
-    since =  datetime.datetime.fromtimestamp(next(msgs).get_date())
-    return since
+    msgs = db.messages(f'to:{project_list}', sort=notmuch2.Database.SORT.OLDEST_FIRST)
+    return datetime.datetime.fromtimestamp(next(msgs).date)
 
 def insert_nm_patch_status(conn,message_id,project_name,tag):
     conn.execute('''INSERT OR REPLACE INTO nm_patch_status
@@ -191,18 +172,16 @@ def insert_nm_patch_status(conn,message_id,project_name,tag):
 
 def populate_nm_patch_status(db,conn,project_name,all_my_tags):
     for t in all_my_tags:
-        qstr = 'tag:pw-{} and tag:pw-{}-{}'.format(project_name,project_name,t)
-        q = notmuch.Query(db, qstr)
-        msgs = q.search_messages()
-        for m in msgs:
-            insert_nm_patch_status(conn,m.get_message_id(),project_name,t)
+        qstr = f'tag:pw-{project_name} and tag:pw-{project_name}-{t}'
+        for m in db.messages(qstr):
+            insert_nm_patch_status(conn,m.messageid,project_name,t)
         conn.commit()
 
 def patchwork_login(session, url):
     patchwork_url = url + '/api'
     r = session.get(patchwork_url, stream=False).result()
     if r.status_code != 200:
-        raise Exception("ERROR patchwork API request failed status = %d" % r.status_code)
+        raise Exception(f"ERROR patchwork API request failed status = {r.status_code}")
 
     patchwork_url = patchwork_url + '/1.0'
     return patchwork_url
@@ -217,7 +196,6 @@ def get_projects(session, patchwork_url):
         p = r.json()
 
         for project in p:
-            #print(("{}\t{}".format(project['id'],project['link_name'])))
             projects[project['link_name']] = project['id']
 
         if not r.links.get('next'):
@@ -235,73 +213,63 @@ def process_pw_patches(session, nmdb, conn, project_name, r):
         p = r.result().json()
         # We open the DB for each batch as to not hold the notmuch
         # database open blocking other writers for too long.
-        db = notmuch.Database(nmdb, mode=notmuch.Database.MODE.READ_WRITE)
-        # We initiate the async load of the next page now, as we go and make the
-        # changes to our local DBs.
-        if r.result().links.get('next'):
-            r = session.get(r.result().links['next']['url'], stream=False)
-        else:
-            # This is the last page.
-            done = True
-
-        db.begin_atomic()
-        for patch in p:
-            nr_patches_processed = nr_patches_processed + 1
-            conn.execute('''INSERT OR REPLACE INTO pw_patch_status
-            (msgid,project,patchid,state,need_sync)
-            VALUES (?,?,?,?,
-            COALESCE((SELECT 1 FROM pw_patch_status WHERE msgid=? and project=? and state IS NOT ?),
-                     (SELECT need_sync FROM pw_patch_status WHERE msgid=? and project=?),
-                     0)
-            )''',
-                         (patch['msgid'][1:-1], project_name, patch['id'], patch['state'],
-                          patch['msgid'][1:-1], project_name, patch['state'],
-                          patch['msgid'][1:-1], project_name,
-                         ))
-
-            query_str = 'id:{}'.format(patch['msgid'][1:-1])
-            q = notmuch.Query(db, query_str)
-            msgs = q.search_messages()
-            try:
-                msg = next(msgs)
-            except StopIteration:
-                print("MESSAGE NOT FOUND: '{}' - skipping".format(query_str))
-                # If we don't have the message, just continue.
-                continue
-
-            # If we need to update PW, skip setting the tags in nm
-            c = conn.cursor()
-            c.execute("SELECT state from nm_patch_status WHERE msgid=? AND project=? AND need_sync=1",
-                      [patch['msgid'][1:-1],project_name])
-            curstate = c.fetchone()
-            tag = patch['state']
-            if curstate:
-                print("Going to sync {} to patchwork for {}".format(patch['msgid'],project_name))
-                tag = curstate[0]
-
-            #msg.freeze()
-            msg.add_tag('pw-{}'.format(project_name))
-            msg.add_tag('patchwork')
-            for t in all_my_tags:
-                msg.remove_tag('pw-{}-{}'.format(project_name,t))
-
-            if tag in all_my_tags:
-                msg.add_tag('pw-{}-{}'.format(project_name,tag))
+        with notmuch2.Database(nmdb, mode=notmuch2.Database.MODE.READ_WRITE) as db:
+            # We initiate the async load of the next page now, as we go and make the
+            # changes to our local DBs.
+            if r.result().links.get('next'):
+                r = session.get(r.result().links['next']['url'], stream=False)
             else:
-                if not_approved.get(tag):
-                    not_approved[tag] = not_approved[tag] + 1
-                else:
-                    not_approved[tag] = 1
-                    #print("Not adding tag, as '{}'not in approved list".format(tag))
-            #msg.thaw()
-            insert_nm_patch_status(conn,patch['msgid'][1:-1],project_name,tag)
-        db.end_atomic()
-        conn.commit()
-        db.close()
+                # This is the last page.
+                done = True
 
-        print("Processed {} {} patches...".format(nr_patches_processed, project_name))
+            with db.atomic():
+                for patch in p:
+                    nr_patches_processed = nr_patches_processed + 1
+                    msgid = patch['msgid'][1:-1]
+                    conn.execute('''INSERT OR REPLACE INTO pw_patch_status
+                    (msgid,project,patchid,state,need_sync)
+                    VALUES (?,?,?,?,
+                    COALESCE((SELECT 1 FROM pw_patch_status WHERE msgid=? and project=? and state IS NOT ?),
+                             (SELECT need_sync FROM pw_patch_status WHERE msgid=? and project=?),
+                             0)
+                    )''',
+                                 (msgid, project_name, patch['id'], patch['state'],
+                                  msgid, project_name, patch['state'],
+                                  msgid, project_name,
+                                 ))
 
-    print("Finished processing {} {} patches!".format(nr_patches_processed, project_name))
+                    try:
+                        msg = db.find(msgid)
+                    except LookupError:
+                        print(f"MESSAGE NOT FOUND: 'id:{msgid}' - skipping")
+                        # If we don't have the message, just continue.
+                        continue
+
+                    # If we need to update PW, skip setting the tags in nm
+                    c = conn.cursor()
+                    c.execute("SELECT state from nm_patch_status WHERE msgid=? AND project=? AND need_sync=1",
+                              [msgid,project_name])
+                    curstate = c.fetchone()
+                    tag = patch['state']
+                    if curstate:
+                        print(f"Going to sync {patch['msgid']} to patchwork for {project_name}")
+                        tag = curstate[0]
+
+                    msg.tags.add(f'pw-{project_name}')
+                    msg.tags.add('patchwork')
+                    for t in all_my_tags:
+                        msg.tags.discard(f'pw-{project_name}-{t}')
+
+                    if tag in all_my_tags:
+                        msg.tags.add(f'pw-{project_name}-{tag}')
+                    else:
+                        not_approved[tag] = not_approved.get(tag, 0) + 1
+                    insert_nm_patch_status(conn,msgid,project_name,tag)
+            conn.commit()
+
+        print(f"Processed {nr_patches_processed} {project_name} patches...")
+
+    print(f"Finished processing {nr_patches_processed} {project_name} patches!")
     print(not_approved)
 
 
@@ -324,24 +292,21 @@ def update_patchwork(session, conn, patchwork_url, project_name):
     WHERE pw_patch_status.msgid=nm_patch_status.msgid
       AND pw_patch_status.project=nm_patch_status.project
       AND nm_patch_status.project=? and nm_patch_status.need_sync=1''', [project_name]):
-        print("Updating patch {} (id:{}) to {}".format(row[0],row[2],row[1]))
-        session.patch(patchwork_url + '/patches/{}/'.format(row[0]),
+        print(f"Updating patch {row[0]} (id:{row[2]}) to {row[1]}")
+        session.patch(f'{patchwork_url}/patches/{row[0]}/',
                 json={'state': row[1]}).result()
-        r =  session.get(patchwork_url + '/patches/{}/'.format(row[0]))
+        r = session.get(f'{patchwork_url}/patches/{row[0]}/')
         p = r.result().json()
         if row[1] == p['state']:
             conn.execute("UPDATE nm_patch_status SET need_sync=0 WHERE msgid=? AND project=?", [row[2],project_name])
         else:
-            print("ERROR State didn't update for {} - are you maintainer of {}?".format(row[0],project_name))
+            print(f"ERROR State didn't update for {row[0]} - are you maintainer of {project_name}?")
 
 
 if __name__ == '__main__':
     try:
         main()
     except Exception as e:
-        # Uncomment for stack trace
-        #import traceback
-        #traceback.print_exc()
         print("Error", e)
         sys.exit(1)
 

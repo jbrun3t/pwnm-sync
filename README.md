@@ -20,6 +20,16 @@ You will need:
  - A patchwork instance with REST API support (i.e. patchwork 2.0+)
  - A REST API Token
  - A local notmuch database
+ - Python 3.12 or newer
+ - The notmuch development headers (`libnotmuch-dev` on Debian): the
+   `notmuch2` Python bindings are compiled against them at install time
+
+Install the dependencies in a virtual environment:
+```
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python pwnm-sync.py --help
+```
 
 My ~/.pwnm-sync.ini config file looks like:
 ```
