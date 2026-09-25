@@ -16,9 +16,8 @@ If you already use tags with this prefix, send a patch to fix
 this software!
 
 You will need:
- - A login to a patchwork instance
- - A patchwork instance with REST API support (i.e. patchwork 2.0+)
- - A REST API Token
+ - A patchwork instance with REST API version 1.3 (i.e. patchwork 3.1+)
+ - A login and REST API token on it, to update patch states
  - A local notmuch database
  - Python 3.12 or newer
  - The notmuch development headers (`libnotmuch-dev` on Debian): the

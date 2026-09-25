@@ -12,7 +12,7 @@ license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
     "notmuch2",
-    "requests-futures",
+    "requests",
 ]
 
 [project.optional-dependencies]

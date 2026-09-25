@@ -19,14 +19,20 @@
 import argparse
 import configparser
 import datetime
+import itertools
 import os
 import sqlite3
 import sys
 
 import notmuch2
-from requests_futures.sessions import FuturesSession
 
 from . import Error
+from .config import Patchwork
+from .patchwork import Client, PwError
+
+API_VERSION = "1.3"
+# Patches handled while the notmuch database is held open for writing
+BATCH = 100
 
 all_my_tags = [
     "accepted",
@@ -146,18 +152,14 @@ def sync():
     PRIMARY KEY(msgid,project))""")
     conn.commit()
 
-    s = FuturesSession()
-    s.headers.update({"Authorization": f"Token {pw_token}"})
-
-    patchwork_url = patchwork_login(s, args.patchwork_url)
-    projects = get_projects(s, patchwork_url)
+    api_url = f"{args.patchwork_url.rstrip('/')}/api/{API_VERSION}"
 
     for project in args.sync.split(","):
         project_name, project_list = project.split("=")
-        if project_name not in projects:
-            raise Error(f"ERROR couldn't find project '{project_name}'")
+        client = Client(Patchwork(api_url, project_name), token=pw_token)
+        project_id = client.project_data()["id"]
 
-        print(f"Looking at project {project_name} (id {projects[project_name]})")
+        print(f"Looking at project {project_name} (id {project_id})")
         with notmuch2.Database(nmdb) as db:
             if args.epoch is None:
                 oldest_msg = get_oldest_nm_message(db, project_list)
@@ -167,10 +169,7 @@ def sync():
             print(f"Going to look at things post {oldest_msg}")
             populate_nm_patch_status(db, conn, project_name, all_my_tags)
 
-        # we now have a map of project names to IDs, so we can use that.
-        process_pw_patches_for_project(
-            s, nmdb, conn, patchwork_url, project_name, projects[project_name], oldest_msg
-        )
+        process_pw_patches(client, nmdb, conn, project_name, oldest_msg)
 
         # We now know:
         # 1) What changed locally (nm_patch_status.need_sync=1)
@@ -194,7 +193,7 @@ def sync():
 
         # We're now left with need_sync=1 on nm_patch_status for only
         # things we need to update in PW.
-        update_patchwork(s, conn, patchwork_url, project_name)
+        update_patchwork(client, conn, project_name)
 
         # Things only updated in PW, ignore them (we've forced state sync above)
         conn.execute(
@@ -230,54 +229,15 @@ def populate_nm_patch_status(db, conn, project_name, all_my_tags):
         conn.commit()
 
 
-def patchwork_login(session, url):
-    patchwork_url = url + "/api"
-    r = session.get(patchwork_url, stream=False).result()
-    if r.status_code != 200:
-        raise Error(f"ERROR patchwork API request failed status = {r.status_code}")
-
-    patchwork_url = patchwork_url + "/1.0"
-    return patchwork_url
-
-
-def get_projects(session, patchwork_url):
-    url = patchwork_url + "/projects"
-
-    projects = {}
-    while True:
-        r = session.get(url, params={"per_page": 100}, stream=False).result()
-        p = r.json()
-
-        for project in p:
-            projects[project["link_name"]] = project["id"]
-
-        if not r.links.get("next"):
-            break
-
-        url = r.links["next"]["url"]
-
-    return projects
-
-
-def process_pw_patches(session, nmdb, conn, project_name, r):
+def process_pw_patches(client, nmdb, conn, project_name, oldest_msg):
     nr_patches_processed = 0
     not_approved = {}
-    done = False
-    while not done:
-        p = r.result().json()
+    for batch in itertools.batched(client.patch_list(since=oldest_msg), BATCH):
         # We open the DB for each batch as to not hold the notmuch
         # database open blocking other writers for too long.
         with notmuch2.Database(nmdb, mode=notmuch2.Database.MODE.READ_WRITE) as db:
-            # We initiate the async load of the next page now, as we go and make the
-            # changes to our local DBs.
-            if r.result().links.get("next"):
-                r = session.get(r.result().links["next"]["url"], stream=False)
-            else:
-                # This is the last page.
-                done = True
-
             with db.atomic():
-                for patch in p:
+                for patch in batch:
                     nr_patches_processed = nr_patches_processed + 1
                     msgid = patch["msgid"][1:-1]
                     conn.execute(
@@ -338,25 +298,7 @@ def process_pw_patches(session, nmdb, conn, project_name, r):
     print(not_approved)
 
 
-def process_pw_patches_for_project(
-    session, nmdb, conn, patchwork_url, project_name, project_id, oldest_msg
-):
-    patches_url = patchwork_url + "/patches"
-
-    r = session.get(
-        patches_url,
-        stream=False,
-        params={
-            "per_page": 500,
-            "since": oldest_msg,
-            "project": project_id,
-        },
-    )
-
-    process_pw_patches(session, nmdb, conn, project_name, r)
-
-
-def update_patchwork(session, conn, patchwork_url, project_name):
+def update_patchwork(client, conn, project_name):
     cur = conn.cursor()
     for row in cur.execute(
         """
@@ -371,16 +313,15 @@ def update_patchwork(session, conn, patchwork_url, project_name):
         [project_name],
     ):
         print(f"Updating patch {row[0]} (id:{row[2]}) to {row[1]}")
-        session.patch(f"{patchwork_url}/patches/{row[0]}/", json={"state": row[1]}).result()
-        r = session.get(f"{patchwork_url}/patches/{row[0]}/")
-        p = r.result().json()
-        if row[1] == p["state"]:
-            conn.execute(
-                "UPDATE nm_patch_status SET need_sync=0 WHERE msgid=? AND project=?",
-                [row[2], project_name],
-            )
-        else:
-            print(f"ERROR State didn't update for {row[0]} - are you maintainer of {project_name}?")
+        try:
+            client.update(row[0], state=row[1])
+        except PwError as e:
+            print(f"ERROR {e} - are you maintainer of {project_name}?")
+            continue
+        conn.execute(
+            "UPDATE nm_patch_status SET need_sync=0 WHERE msgid=? AND project=?",
+            [row[2], project_name],
+        )
 
 
 def main():
