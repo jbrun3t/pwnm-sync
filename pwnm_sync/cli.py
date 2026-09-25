@@ -16,13 +16,12 @@
 #
 # SPDX-License-Identifier:  GPL-3.0-or-later
 
-import argparse
 import configparser
 import datetime
 import itertools
 import os
-import sys
 
+import click
 import notmuch2
 
 from . import Error
@@ -50,121 +49,102 @@ STATES = [
 ]
 
 
-def sync():
-    initial_argp = argparse.ArgumentParser(add_help=False)
-    initial_argp.add_argument(
-        "-c",
-        "--config",
-        dest="config_file",
-        type=str,
-        help="Configuration file for pwnm-sync",
-        default=os.path.join(os.path.expanduser("~"), ".pwnm-sync.ini"),
-    )
+def load_config(ctx, param, path):
+    """Take the [Defaults] section of the configuration file as the options' defaults."""
+    if not os.path.isfile(path):
+        click.echo(f"Config file {path} not found!")
+        return
+    config = configparser.ConfigParser()
+    config.read(path)
+    ctx.default_map = dict(config.items("Defaults"))
 
-    args, remaining_argv = initial_argp.parse_known_args()
-    argp = argparse.ArgumentParser()
 
-    defaults = {
-        "notmuch_database": os.path.join(os.path.expanduser("~"), "Maildir", "INBOX"),
-        "syncdb": os.path.join(os.path.expanduser("~"), ".pwnm-sync.db"),
-        "patchwork_url": "https://patchwork.ozlabs.org",
-        "sync": "skiboot=skiboot@lists.ozlabs.org",
-        "epoch": None,
-    }
+@click.command(context_settings={"help_option_names": ["-h", "--help"]})
+@click.option(
+    "-c",
+    "--config",
+    default=os.path.expanduser("~/.pwnm-sync.ini"),
+    is_eager=True,
+    expose_value=False,
+    callback=load_config,
+    help="Configuration file for pwnm-sync",
+)
+@click.option(
+    "-m",
+    "--notmuch-database",
+    default=os.path.expanduser("~/Maildir/INBOX"),
+    help="The notmuch database to sync",
+)
+@click.option(
+    "-d",
+    "--syncdb",
+    default=os.path.expanduser("~/.pwnm-sync.db"),
+    help="The path to the sqlite3 database that pwnm-sync uses to keep track of the state "
+    "of the local notmuch and remote patchwork databases.",
+)
+@click.option(
+    "-t",
+    "--patchwork-token",
+    help="Your Patchwork API token. Get it from /user/ on your patchwork instance.",
+)
+@click.option(
+    "-p",
+    "--patchwork-url",
+    default="https://patchwork.ozlabs.org",
+    help="The URL to your patchwork instance. Must support REST API.",
+)
+@click.option(
+    "-s",
+    "--sync",
+    default="skiboot=skiboot@lists.ozlabs.org",
+    help="Projects and lists to sync. In the format project1=list1@server1,project2=list2@server2",
+)
+@click.option(
+    "-e",
+    "--epoch",
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    help="Only consider patches on or after this date",
+)
+@click.option(
+    "-n",
+    "--dry-run",
+    is_flag=True,
+    help="Print what would change, without writing to patchwork, notmuch or the syncdb",
+)
+def main(notmuch_database, syncdb, patchwork_token, patchwork_url, sync, epoch, dry_run):
+    """Sync patch state between Patchwork and Notmuch."""
+    nmdb = os.path.expanduser(notmuch_database)
+    api_url = f"{patchwork_url.rstrip('/')}/api/{API_VERSION}"
+    if epoch is not None:
+        # Naive UTC, see get_oldest_nm_message()
+        epoch = epoch.astimezone(datetime.UTC).replace(tzinfo=None)
 
-    if not os.path.isfile(args.config_file):
-        print(f"Config file {args.config_file} not found!")
-        args.config_file = None
+    try:
+        open_store(syncdb, dry_run=dry_run)
+        with database.atomic() as transaction:
+            for project in sync.split(","):
+                project_name, project_list = project.split("=")
+                client = Client(
+                    Patchwork(api_url, project_name),
+                    token=patchwork_token,
+                    dry_run=dry_run,
+                )
+                project_id = client.project_data()["id"]
 
-    if args.config_file:
-        config = configparser.ConfigParser()
-        config.read([args.config_file])
-        config_values = dict(config.items("Defaults"))
-        defaults = {**defaults, **config_values}
+                click.echo(f"Looking at project {project_name} (id {project_id})")
+                if epoch is None:
+                    with notmuch2.Database(nmdb) as db:
+                        oldest_msg = get_oldest_nm_message(db, project_list)
+                else:
+                    oldest_msg = epoch
 
-    argp.set_defaults(**defaults)
-    argp.add_argument(
-        "-m",
-        "--notmuch-database",
-        dest="notmuch_database",
-        type=str,
-        help="The notmuch database to sync",
-    )
-    argp.add_argument(
-        "-d",
-        "--syncdb",
-        dest="syncdb",
-        type=str,
-        help="The path to the sqlite3 database that pwnm-sync "
-        + "uses to keep track of the state of the local notmuch and "
-        + "remote patchwork databases.",
-    )
-    argp.add_argument(
-        "-t",
-        "--patchwork-token",
-        dest="patchwork_token",
-        type=str,
-        help="Your Patchwork API token. Get it from /user/ on your " + "patchwork instance.",
-    )
-    argp.add_argument(
-        "-p",
-        "--patchwork-url",
-        dest="patchwork_url",
-        type=str,
-        help="The URL to your patchwork instance. Must support REST API.",
-    )
-    argp.add_argument(
-        "-s",
-        "--sync",
-        dest="sync",
-        type=str,
-        help="Projects and lists to sync. "
-        + "In the format project1=list1@server1,project2=list2@server2",
-    )
-    argp.add_argument(
-        "-e",
-        "--epoch",
-        dest="epoch",
-        type=lambda s: (
-            datetime.datetime.strptime(s, "%Y-%m-%d").astimezone(datetime.UTC).replace(tzinfo=None)
-        ),
-        help="Only consider patches on or after this date",
-    )
-    argp.add_argument(
-        "-n",
-        "--dry-run",
-        action="store_true",
-        help="Print what would change, without writing to patchwork, notmuch or the syncdb",
-    )
+                click.echo(f"Going to look at things post {oldest_msg}")
+                sync_project(client, nmdb, project_name, oldest_msg, dry_run)
 
-    args = argp.parse_args(remaining_argv)
-
-    nmdb = os.path.expanduser(args.notmuch_database)
-    api_url = f"{args.patchwork_url.rstrip('/')}/api/{API_VERSION}"
-
-    open_store(args.syncdb, dry_run=args.dry_run)
-    with database.atomic() as transaction:
-        for project in args.sync.split(","):
-            project_name, project_list = project.split("=")
-            client = Client(
-                Patchwork(api_url, project_name),
-                token=args.patchwork_token,
-                dry_run=args.dry_run,
-            )
-            project_id = client.project_data()["id"]
-
-            print(f"Looking at project {project_name} (id {project_id})")
-            if args.epoch is None:
-                with notmuch2.Database(nmdb) as db:
-                    oldest_msg = get_oldest_nm_message(db, project_list)
-            else:
-                oldest_msg = args.epoch
-
-            print(f"Going to look at things post {oldest_msg}")
-            sync_project(client, nmdb, project_name, oldest_msg, args.dry_run)
-
-        if args.dry_run:
-            transaction.rollback()
+            if dry_run:
+                transaction.rollback()
+    except Error as e:
+        raise click.ClickException(str(e)) from e
 
 
 def get_oldest_nm_message(db, project_list):
@@ -187,10 +167,10 @@ def sync_project(client, nmdb, project, since, dry_run):
 
     for row in Patch.select().where(Patch.project == project):
         if row.id not in listed:
-            print(f"patch {row.id}: leaves the sync")
+            click.echo(f"patch {row.id}: leaves the sync")
             row.delete_instance()
 
-    print(f"Finished processing {len(listed)} {project} patches!")
+    click.echo(f"Finished processing {len(listed)} {project} patches!")
 
 
 def sync_patch(client, db, project, patch, dry_run):
@@ -202,7 +182,7 @@ def sync_patch(client, db, project, patch, dry_run):
     try:
         msg = db.find(msgid)
     except LookupError:
-        print(f"MESSAGE NOT FOUND: 'id:{msgid}' - skipping")
+        click.echo(f"MESSAGE NOT FOUND: 'id:{msgid}' - skipping")
         return
 
     row = Patch.get_or_none(Patch.id == patch["id"])
@@ -211,14 +191,16 @@ def sync_patch(client, db, project, patch, dry_run):
         # Patchwork did not move: a state tag other than the agreed one is a local change
         local = {s for s in STATES if f"pw-{project}-{s}" in msg.tags} - {row.state}
         if len(local) > 1:
-            print(f"patch {patch['id']} <{msgid}>: tagged {sorted(local)} - taking patchwork's")
+            click.echo(
+                f"patch {patch['id']} <{msgid}>: tagged {sorted(local)} - taking patchwork's"
+            )
         elif local:
             state = local.pop()
-            print(f"patch {patch['id']} <{msgid}>: patchwork {row.state} -> {state}")
+            click.echo(f"patch {patch['id']} <{msgid}>: patchwork {row.state} -> {state}")
             try:
                 client.update(patch["id"], state=state)
             except PwError as e:
-                print(f"ERROR {e} - are you maintainer of {project}?")
+                click.echo(f"ERROR {e} - are you maintainer of {project}?")
                 return
 
     retag(msg, project, state, dry_run)
@@ -236,18 +218,10 @@ def retag(msg, project, state, dry_run):
         return
 
     changes = [f"+{t}" for t in sorted(add)] + [f"-{t}" for t in sorted(remove)]
-    print(f"<{msg.messageid}>: notmuch {' '.join(changes)}")
+    click.echo(f"<{msg.messageid}>: notmuch {' '.join(changes)}")
     if dry_run:
         return
     for t in add:
         msg.tags.add(t)
     for t in remove:
         msg.tags.discard(t)
-
-
-def main():
-    try:
-        sync()
-    except Error as e:
-        print("Error", e)
-        sys.exit(1)
