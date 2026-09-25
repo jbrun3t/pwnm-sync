@@ -7,9 +7,7 @@ See https://patchwork.readthedocs.io/en/stable/api/rest/
 from __future__ import annotations
 
 import datetime
-import os
 from collections.abc import Iterator
-from pathlib import Path
 from urllib.parse import urlencode
 
 import requests
@@ -21,23 +19,10 @@ from .config import Patchwork
 
 RETRY = Retry(connect=3, backoff_factor=0.5)
 USER_AGENT = f"{NAME}/{VERSION}"
-TOKEN_ENV = "PW_TRIAGE_BOT_TOKEN"
-DEV_NULL = "/dev/null"
 DEFAULT_PER_PAGE = 100
 DEFAULT_TIMEOUT = 30
 # Leaves the delegate as it is, None clearing it
 KEEP = object()
-
-
-def token(path: Path) -> str | None:
-    """The token authenticating writes: the file at `path` if it is there, else the environment."""
-    if path.is_file():
-        return path.read_text().strip() or None
-    return os.environ.get(TOKEN_ENV) or None
-
-
-class DiffError(Error):
-    """A diff could not be parsed."""
 
 
 class PwError(Error):
@@ -103,9 +88,6 @@ class Client:
     def patch_list(self, **params: object) -> Iterator[dict]:
         return self._list("patches", project=self._config.project, **params)
 
-    def event_list(self, **params: object) -> Iterator[dict]:
-        return self._list("events", project=self._config.project, **params)
-
     def _document(self, path: str) -> dict:
         """Fetch one document, refusing one that belongs to another project."""
         url = f"{self._config.url}/{path}/"
@@ -123,9 +105,6 @@ class Client:
 
     def patch_data(self, patch_id: int) -> dict:
         return self._document(f"patches/{patch_id}")
-
-    def series_data(self, series_id: int) -> dict:
-        return self._document(f"series/{series_id}")
 
     def update(
         self,
