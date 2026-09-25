@@ -36,6 +36,8 @@ def open_store(path: str, *, dry_run: bool = False) -> None:
     """Open the store at `path`, creating it if needed; a dry run creates nothing on disk."""
     if dry_run and not os.path.exists(path):
         path = ":memory:"
+    else:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     database.init(path)
     version = database.pragma("user_version")
     if version == SCHEMA_VERSION:

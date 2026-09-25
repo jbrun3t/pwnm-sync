@@ -16,7 +16,6 @@
 #
 # SPDX-License-Identifier:  GPL-3.0-or-later
 
-import configparser
 import itertools
 import os
 
@@ -24,50 +23,23 @@ import click
 import notmuch2
 
 from . import Error
-from .config import Patchwork
+from .config import BATCH, CONFIG_FILE, STATES, SYNCDB, Config, Patchwork, load_defaults
 from .patchwork import Client, PwError
 from .store import Patch, database, open_store
 
 API_VERSION = "1.3"
-# Patches handled while the notmuch database is held open for writing
-BATCH = 250
-
-# The states patchwork.kernel.org serves; a patch in another state gets no state tag
-STATES = [
-    "new",
-    "under-review",
-    "changes-requested",
-    "awaiting-upstream",
-    "handled-elsewhere",
-    "not-applicable",
-    "superseded",
-    "accepted",
-    "rejected",
-    "deferred",
-    "rfc",
-]
 ARCHIVED = "archived"
 DELEGATE = "delegate-"
-
-
-def load_config(ctx, param, path):
-    """Take the [Defaults] section of the configuration file as the options' defaults."""
-    if not os.path.isfile(path):
-        click.echo(f"Config file {path} not found!")
-        return
-    config = configparser.ConfigParser()
-    config.read(path)
-    ctx.default_map = dict(config.items("Defaults"))
 
 
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
 @click.option(
     "-c",
     "--config",
-    default=os.path.expanduser("~/.pwnm-sync.ini"),
+    default=CONFIG_FILE,
     is_eager=True,
     expose_value=False,
-    callback=load_config,
+    callback=load_defaults,
     help="Configuration file for pwnm-sync",
 )
 @click.option(
@@ -79,7 +51,7 @@ def load_config(ctx, param, path):
 @click.option(
     "-d",
     "--syncdb",
-    default=os.path.expanduser("~/.pwnm-sync.db"),
+    default=SYNCDB,
     help="The path to the sqlite3 database that pwnm-sync uses to keep track of the state "
     "of the local notmuch and remote patchwork databases.",
 )
@@ -100,6 +72,17 @@ def load_config(ctx, param, path):
     required=True,
     help="Patchwork projects to sync, comma separated. "
     "A project=list entry is accepted, the list is not used.",
+)
+@click.option(
+    "--states",
+    default=",".join(STATES),
+    help="Patch states to tag, comma separated; a patch in another state gets no state tag.",
+)
+@click.option(
+    "--batch",
+    type=click.IntRange(min=1),
+    default=BATCH,
+    help="Patches handled while the notmuch database is held open for writing.",
 )
 @click.option(
     "-n",
@@ -138,6 +121,8 @@ def main(
     patchwork_token,
     patchwork_url,
     project,
+    states,
+    batch,
     dry_run,
     patch_ids,
     msgids,
@@ -149,8 +134,15 @@ def main(
         raise click.UsageError("--from needs --patch-id or --msgid")
     if epoch and (patch_ids or msgids):
         raise click.UsageError("--epoch does not apply to --patch-id or --msgid")
-    nmdb = os.path.expanduser(notmuch_database)
     api_url = f"{patchwork_url.rstrip('/')}/api/{API_VERSION}"
+    sync = Sync(
+        Config(
+            notmuch=os.path.expanduser(notmuch_database),
+            states=[s.strip() for s in states.split(",") if s.strip()],
+            batch=batch,
+            dry_run=dry_run,
+        )
+    )
 
     try:
         open_store(syncdb, dry_run=dry_run)
@@ -163,22 +155,17 @@ def main(
         with database.atomic() as transaction:
             if patch_ids or msgids:
                 patches = find_patches(clients, patch_ids, msgids)
-                with open_notmuch(nmdb, dry_run) as db, db.atomic():
+                with sync.open_notmuch() as db, db.atomic():
                     for name, patch in patches:
-                        sync_patch(clients[name], db, name, patch, dry_run, source)
+                        sync.sync_patch(clients[name], db, name, patch, source)
             else:
                 for name, client in clients.items():
-                    sync_project(client, nmdb, name, dry_run, epoch and epoch.astimezone())
+                    sync.sync_project(client, name, epoch and epoch.astimezone())
 
             if dry_run:
                 transaction.rollback()
     except Error as e:
         raise click.ClickException(str(e)) from e
-
-
-def open_notmuch(path, dry_run):
-    mode = notmuch2.Database.MODE.READ_ONLY if dry_run else notmuch2.Database.MODE.READ_WRITE
-    return notmuch2.Database(path, mode=mode)
 
 
 def find_patches(clients, patch_ids, msgids):
@@ -207,119 +194,6 @@ def find_patches(clients, patch_ids, msgids):
     return found
 
 
-def sync_project(client, nmdb, project, dry_run, epoch=None):
-    """Sync the project's unarchived patches, or all since `epoch`, then the stored ones not listed."""
-    click.echo(f"Looking at project {project}")
-    listed = set()
-    patches = client.patch_list(since=epoch) if epoch else client.patch_list(archived=False)
-    for batch in itertools.batched(patches, BATCH):
-        # We open the DB for each batch as to not hold the notmuch
-        # database open blocking other writers for too long.
-        with open_notmuch(nmdb, dry_run) as db, db.atomic():
-            for patch in batch:
-                listed.add(patch["id"])
-                sync_patch(client, db, project, patch, dry_run)
-
-    unlisted = [
-        row for row in Patch.select().where(Patch.project == project) if row.id not in listed
-    ]
-    if unlisted:
-        with open_notmuch(nmdb, dry_run) as db, db.atomic():
-            for row in unlisted:
-                sync_unlisted(client, db, project, row, dry_run, archived=not epoch)
-
-    click.echo(f"Finished processing {len(listed)} {project} patches!")
-
-
-def sync_unlisted(client, db, project, row, dry_run, archived=True):
-    """Sync a stored patch missing from the listing.
-
-    Missing means archived in patchwork when `archived` is true; a listing by date also
-    misses older patches. Its values are known without asking patchwork until the tags
-    move away from them.
-    """
-    try:
-        msg = db.find(row.msgid)
-    except LookupError:
-        row.delete_instance()
-        return
-
-    stored = stored_values(row)
-    if owned_tags(project, msg.tags) != owned_tags(project, project_tags(project, stored)):
-        try:
-            patch = client.patch_data(row.id)
-        except PwError as e:
-            click.echo(f"patch {row.id} <{row.msgid}>: {e}")
-            return
-        sync_patch(client, db, project, patch, dry_run)
-    elif archived and not row.archived:
-        change_tags(msg, project_tags(project, stored | {"archived": True}), set(), dry_run)
-        row.archived = True
-        row.save()
-
-
-def sync_patch(client, db, project, patch, dry_run, source=None):
-    """Carry over whichever side moved since the last run, or the `source` side when given.
-
-    Each field is reconciled on its own. Patchwork wins when both sides moved, when the
-    patch was never synced, or when the tags give several new values.
-    """
-    msgid = patch["msgid"][1:-1]
-    try:
-        msg = db.find(msgid)
-    except LookupError:
-        Patch.delete_by_id(patch["id"])
-        return
-
-    row = Patch.get_or_none(Patch.id == patch["id"])
-    stored = stored_values(row) if row else None
-    remote = patchwork_values(patch)
-    local = tagged_values(project, msg.tags)
-    keep, push, ambiguous = {}, {}, {}
-    for field, pw in remote.items():
-        if source == "notmuch":
-            base = pw  # any other value the tags hold is pushed
-        elif source == "patchwork" or stored is None:
-            keep[field] = pw
-            continue
-        else:
-            base = stored[field]
-        moved = local[field] - {base}
-        if pw != base or not moved:
-            keep[field] = pw
-        elif len(moved) == 1:
-            keep[field] = push[field] = moved.pop()
-        else:
-            keep[field] = pw
-            ambiguous[field] = moved
-
-    label = f"patch {patch['id']} <{msgid}>"
-    for field, values in ambiguous.items():
-        click.echo(f"{label}: {field} tagged {sorted(values, key=str)} - taking patchwork's")
-    if ambiguous and source == "notmuch":
-        return
-    if push:
-        changes = ", ".join(f"{field} {remote[field]} -> {value}" for field, value in push.items())
-        click.echo(f"{label}: patchwork {changes}")
-        update = dict(push)
-        if push.get("delegate"):
-            # Patchwork only delegates to the project's maintainers, and wants their id
-            ids = {user["username"]: user["id"] for user in client.project_data()["maintainers"]}
-            if push["delegate"] not in ids:
-                click.echo(f"ERROR {push['delegate']} is not a maintainer of {project}")
-                return
-            update["delegate"] = ids[push["delegate"]]
-        try:
-            client.update(patch["id"], **update)
-        except PwError as e:
-            click.echo(f"ERROR {e} - are you maintainer of {project}?")
-            return
-
-    want = project_tags(project, keep)
-    change_tags(msg, want, owned_tags(project, msg.tags) - want, dry_run)
-    Patch.replace(id=patch["id"], project=project, msgid=msgid, **keep).execute()
-
-
 def patchwork_values(patch):
     delegate = patch["delegate"]["username"] if patch["delegate"] else None
     return {"state": patch["state"], "archived": patch["archived"], "delegate": delegate}
@@ -329,52 +203,177 @@ def stored_values(row):
     return {"state": row.state, "archived": row.archived, "delegate": row.delegate}
 
 
-def tagged_values(project, tags):
-    """The values the message's tags give each field.
+class Sync:
+    """Syncs patches between patchwork and notmuch as the configuration says."""
 
-    No archived tag means not archived, and no delegate tag no delegate.
-    """
-    prefix = f"pw-{project}-"
-    delegates = {t.removeprefix(prefix + DELEGATE) for t in tags if t.startswith(prefix + DELEGATE)}
-    return {
-        "state": {s for s in STATES if prefix + s in tags},
-        "archived": {prefix + ARCHIVED in tags},
-        "delegate": delegates or {None},
-    }
+    def __init__(self, config):
+        self.config = config
 
+    def open_notmuch(self):
+        modes = notmuch2.Database.MODE
+        mode = modes.READ_ONLY if self.config.dry_run else modes.READ_WRITE
+        return notmuch2.Database(self.config.notmuch, mode=mode)
 
-def project_tags(project, values):
-    """The tags a message carries for a patch of the project with these values."""
-    prefix = f"pw-{project}-"
-    tags = {"patchwork", f"pw-{project}"}
-    if values["state"] in STATES:
-        tags.add(prefix + values["state"])
-    if values["archived"]:
-        tags.add(prefix + ARCHIVED)
-    if values["delegate"]:
-        tags.add(prefix + DELEGATE + values["delegate"])
-    return tags
+    def sync_project(self, client, project, epoch=None):
+        """Sync the project's unarchived patches, or all since `epoch`, then the stored ones not listed."""
+        click.echo(f"Looking at project {project}")
+        listed = set()
+        patches = client.patch_list(since=epoch) if epoch else client.patch_list(archived=False)
+        for batch in itertools.batched(patches, self.config.batch):
+            # We open the DB for each batch as to not hold the notmuch
+            # database open blocking other writers for too long.
+            with self.open_notmuch() as db, db.atomic():
+                for patch in batch:
+                    listed.add(patch["id"])
+                    self.sync_patch(client, db, project, patch)
 
+        unlisted = [
+            row for row in Patch.select().where(Patch.project == project) if row.id not in listed
+        ]
+        if unlisted:
+            with self.open_notmuch() as db, db.atomic():
+                for row in unlisted:
+                    self.sync_unlisted(client, db, project, row, archived=not epoch)
 
-def owned_tags(project, tags):
-    """The tags among `tags` that carry a field of the project's patches."""
-    prefix = f"pw-{project}-"
-    fixed = {prefix + v for v in [*STATES, ARCHIVED]}
-    return {t for t in tags if t in fixed or t.startswith(prefix + DELEGATE)}
+        click.echo(f"Finished processing {len(listed)} {project} patches!")
 
+    def sync_unlisted(self, client, db, project, row, archived=True):
+        """Sync a stored patch missing from the listing.
 
-def change_tags(msg, add, remove, dry_run):
-    tags = set(msg.tags)
-    add = add - tags
-    remove = remove & tags
-    if not add and not remove:
-        return
+        Missing means archived in patchwork when `archived` is true; a listing by date also
+        misses older patches. Its values are known without asking patchwork until the tags
+        move away from them.
+        """
+        try:
+            msg = db.find(row.msgid)
+        except LookupError:
+            row.delete_instance()
+            return
 
-    changes = [f"+{t}" for t in sorted(add)] + [f"-{t}" for t in sorted(remove)]
-    click.echo(f"<{msg.messageid}>: notmuch {' '.join(changes)}")
-    if dry_run:
-        return
-    for t in add:
-        msg.tags.add(t)
-    for t in remove:
-        msg.tags.discard(t)
+        stored = stored_values(row)
+        expected = self.owned_tags(project, self.project_tags(project, stored))
+        if self.owned_tags(project, msg.tags) != expected:
+            try:
+                patch = client.patch_data(row.id)
+            except PwError as e:
+                click.echo(f"patch {row.id} <{row.msgid}>: {e}")
+                return
+            self.sync_patch(client, db, project, patch)
+        elif archived and not row.archived:
+            self.change_tags(msg, self.project_tags(project, stored | {"archived": True}), set())
+            row.archived = True
+            row.save()
+
+    def sync_patch(self, client, db, project, patch, source=None):
+        """Carry over whichever side moved since the last run, or the `source` side when given.
+
+        Each field is reconciled on its own. Patchwork wins when both sides moved, when the
+        patch was never synced, or when the tags give several new values.
+        """
+        msgid = patch["msgid"][1:-1]
+        try:
+            msg = db.find(msgid)
+        except LookupError:
+            Patch.delete_by_id(patch["id"])
+            return
+
+        row = Patch.get_or_none(Patch.id == patch["id"])
+        stored = stored_values(row) if row else None
+        remote = patchwork_values(patch)
+        local = self.tagged_values(project, msg.tags)
+        keep, push, ambiguous = {}, {}, {}
+        for field, pw in remote.items():
+            if source == "notmuch":
+                base = pw  # any other value the tags hold is pushed
+            elif source == "patchwork" or stored is None:
+                keep[field] = pw
+                continue
+            else:
+                base = stored[field]
+            moved = local[field] - {base}
+            if pw != base or not moved:
+                keep[field] = pw
+            elif len(moved) == 1:
+                keep[field] = push[field] = moved.pop()
+            else:
+                keep[field] = pw
+                ambiguous[field] = moved
+
+        label = f"patch {patch['id']} <{msgid}>"
+        for field, values in ambiguous.items():
+            click.echo(f"{label}: {field} tagged {sorted(values, key=str)} - taking patchwork's")
+        if ambiguous and source == "notmuch":
+            return
+        if push:
+            changes = ", ".join(
+                f"{field} {remote[field]} -> {value}" for field, value in push.items()
+            )
+            click.echo(f"{label}: patchwork {changes}")
+            update = dict(push)
+            if push.get("delegate"):
+                # Patchwork only delegates to the project's maintainers, and wants their id
+                ids = {
+                    user["username"]: user["id"] for user in client.project_data()["maintainers"]
+                }
+                if push["delegate"] not in ids:
+                    click.echo(f"ERROR {push['delegate']} is not a maintainer of {project}")
+                    return
+                update["delegate"] = ids[push["delegate"]]
+            try:
+                client.update(patch["id"], **update)
+            except PwError as e:
+                click.echo(f"ERROR {e} - are you maintainer of {project}?")
+                return
+
+        want = self.project_tags(project, keep)
+        self.change_tags(msg, want, self.owned_tags(project, msg.tags) - want)
+        Patch.replace(id=patch["id"], project=project, msgid=msgid, **keep).execute()
+
+    def tagged_values(self, project, tags):
+        """The values the message's tags give each field.
+
+        No archived tag means not archived, and no delegate tag no delegate.
+        """
+        prefix = f"pw-{project}-"
+        delegates = {
+            t.removeprefix(prefix + DELEGATE) for t in tags if t.startswith(prefix + DELEGATE)
+        }
+        return {
+            "state": {s for s in self.config.states if prefix + s in tags},
+            "archived": {prefix + ARCHIVED in tags},
+            "delegate": delegates or {None},
+        }
+
+    def project_tags(self, project, values):
+        """The tags a message carries for a patch of the project with these values."""
+        prefix = f"pw-{project}-"
+        tags = {"patchwork", f"pw-{project}"}
+        if values["state"] in self.config.states:
+            tags.add(prefix + values["state"])
+        if values["archived"]:
+            tags.add(prefix + ARCHIVED)
+        if values["delegate"]:
+            tags.add(prefix + DELEGATE + values["delegate"])
+        return tags
+
+    def owned_tags(self, project, tags):
+        """The tags among `tags` that carry a field of the project's patches."""
+        prefix = f"pw-{project}-"
+        fixed = {prefix + v for v in [*self.config.states, ARCHIVED]}
+        return {t for t in tags if t in fixed or t.startswith(prefix + DELEGATE)}
+
+    def change_tags(self, msg, add, remove):
+        tags = set(msg.tags)
+        add = add - tags
+        remove = remove & tags
+        if not add and not remove:
+            return
+
+        changes = [f"+{t}" for t in sorted(add)] + [f"-{t}" for t in sorted(remove)]
+        click.echo(f"<{msg.messageid}>: notmuch {' '.join(changes)}")
+        if self.config.dry_run:
+            return
+        for t in add:
+            msg.tags.add(t)
+        for t in remove:
+            msg.tags.discard(t)

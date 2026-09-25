@@ -15,7 +15,8 @@ python3 -m venv .venv
 
 ## Configure
 
-Options default from the `[Defaults]` section of `~/.pwnm-sync.ini`:
+Options (see `pwnm-sync --help`) default from the `[Defaults]` section of
+`~/.config/pwnm-sync`:
 
 ```
 [Defaults]
@@ -26,7 +27,10 @@ patchwork_token = abcdef1234567890
 
 The instance defaults to patchwork.kernel.org (`patchwork_url` otherwise). The
 token, from your patchwork `/user/` page, is only needed to write to patchwork,
-which only accepts writes from the project maintainers.
+which only accepts writes from the project maintainers. `states` sets which
+patch states get a tag, patchwork.kernel.org's by default. The sync database
+defaults to `~/.local/state/pwnm-sync/pwnm-sync.db`; both paths follow the XDG
+variables.
 
 ## Tags
 
