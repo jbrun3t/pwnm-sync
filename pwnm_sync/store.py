@@ -6,7 +6,7 @@ import peewee
 
 from . import Error
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 database = peewee.SqliteDatabase(None)
 
@@ -26,6 +26,7 @@ class Patch(peewee.Model):
     msgid = peewee.TextField()
     state = peewee.TextField()
     archived = peewee.BooleanField()
+    delegate = peewee.TextField(null=True)  # patchwork username
 
     class Meta:
         database = database

@@ -25,6 +25,8 @@ TOKEN_ENV = "PW_TRIAGE_BOT_TOKEN"
 DEV_NULL = "/dev/null"
 DEFAULT_PER_PAGE = 100
 DEFAULT_TIMEOUT = 30
+# Leaves the delegate as it is, None clearing it
+KEEP = object()
 
 
 def token(path: Path) -> str | None:
@@ -131,13 +133,19 @@ class Client:
         *,
         state: str | None = None,
         archived: bool | None = None,
+        delegate: int | object | None = KEEP,
     ) -> None:
-        """Write the settings given on a patch, skipping whatever is None. A dry run writes nothing."""
+        """Write the settings given on a patch, skipping whatever is None. A dry run writes nothing.
+
+        `delegate` is a user id, or None to clear it.
+        """
         body = {
             key: value
             for key, value in (("state", state), ("archived", archived))
             if value is not None
         }
+        if delegate is not KEEP:
+            body["delegate"] = delegate
         if not body:
             return
         if self._dry_run:

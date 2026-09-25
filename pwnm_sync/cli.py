@@ -50,6 +50,7 @@ STATES = [
     "rfc",
 ]
 ARCHIVED = "archived"
+DELEGATE = "delegate-"
 
 
 def load_config(ctx, param, path):
@@ -297,8 +298,16 @@ def sync_patch(client, db, project, patch, dry_run, source=None):
     if push:
         changes = ", ".join(f"{field} {remote[field]} -> {value}" for field, value in push.items())
         click.echo(f"{label}: patchwork {changes}")
+        update = dict(push)
+        if push.get("delegate"):
+            # Patchwork only delegates to the project's maintainers, and wants their id
+            ids = {user["username"]: user["id"] for user in client.project_data()["maintainers"]}
+            if push["delegate"] not in ids:
+                click.echo(f"ERROR {push['delegate']} is not a maintainer of {project}")
+                return
+            update["delegate"] = ids[push["delegate"]]
         try:
-            client.update(patch["id"], **push)
+            client.update(patch["id"], **update)
         except PwError as e:
             click.echo(f"ERROR {e} - are you maintainer of {project}?")
             return
@@ -309,19 +318,25 @@ def sync_patch(client, db, project, patch, dry_run, source=None):
 
 
 def patchwork_values(patch):
-    return {"state": patch["state"], "archived": patch["archived"]}
+    delegate = patch["delegate"]["username"] if patch["delegate"] else None
+    return {"state": patch["state"], "archived": patch["archived"], "delegate": delegate}
 
 
 def stored_values(row):
-    return {"state": row.state, "archived": row.archived}
+    return {"state": row.state, "archived": row.archived, "delegate": row.delegate}
 
 
 def tagged_values(project, tags):
-    """The values the message's tags give each field; an absent archived tag means False."""
+    """The values the message's tags give each field.
+
+    No archived tag means not archived, and no delegate tag no delegate.
+    """
     prefix = f"pw-{project}-"
+    delegates = {t.removeprefix(prefix + DELEGATE) for t in tags if t.startswith(prefix + DELEGATE)}
     return {
         "state": {s for s in STATES if prefix + s in tags},
         "archived": {prefix + ARCHIVED in tags},
+        "delegate": delegates or {None},
     }
 
 
@@ -333,12 +348,16 @@ def project_tags(project, values):
         tags.add(prefix + values["state"])
     if values["archived"]:
         tags.add(prefix + ARCHIVED)
+    if values["delegate"]:
+        tags.add(prefix + DELEGATE + values["delegate"])
     return tags
 
 
 def owned_tags(project, tags):
     """The tags among `tags` that carry a field of the project's patches."""
-    return {t for t in tags if t in {f"pw-{project}-{v}" for v in [*STATES, ARCHIVED]}}
+    prefix = f"pw-{project}-"
+    fixed = {prefix + v for v in [*STATES, ARCHIVED]}
+    return {t for t in tags if t in fixed or t.startswith(prefix + DELEGATE)}
 
 
 def change_tags(msg, add, remove, dry_run):
