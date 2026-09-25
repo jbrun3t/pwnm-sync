@@ -74,11 +74,6 @@ DELEGATE = "delegate-"
     "A project=list entry is accepted, the list is not used.",
 )
 @click.option(
-    "--states",
-    default=",".join(STATES),
-    help="Patch states to tag, comma separated; a patch in another state gets no state tag.",
-)
-@click.option(
     "--batch",
     type=click.IntRange(min=1),
     default=BATCH,
@@ -115,13 +110,14 @@ DELEGATE = "delegate-"
     type=click.DateTime(formats=["%Y-%m-%d"]),
     help="List the patches since this date, archived or not, rather than every unarchived one.",
 )
+@click.pass_context
 def main(
+    ctx,
     notmuch_database,
     syncdb,
     patchwork_token,
     patchwork_url,
     project,
-    states,
     batch,
     dry_run,
     patch_ids,
@@ -135,10 +131,12 @@ def main(
     if epoch and (patch_ids or msgids):
         raise click.UsageError("--epoch does not apply to --patch-id or --msgid")
     api_url = f"{patchwork_url.rstrip('/')}/api/{API_VERSION}"
+    # Only the configuration file sets the states
+    states = (ctx.default_map or {}).get("states")
     sync = Sync(
         Config(
             notmuch=os.path.expanduser(notmuch_database),
-            states=[s.strip() for s in states.split(",") if s.strip()],
+            states=[s.strip() for s in states.split(",") if s.strip()] if states else STATES,
             batch=batch,
             dry_run=dry_run,
         )
