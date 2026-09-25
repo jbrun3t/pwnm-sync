@@ -1,5 +1,6 @@
 # pwnm-sync - Sync patch state between Patchwork and Notmuch
 # Copyright (C) 2018 Stewart Smith, IBM Corp.
+# Copyright (C) 2026 Jerome Brunet <jbrunet@baylibre.com>
 #
 # This program is free software: you can redistribute it and/or
 # modify it under the terms of the GNU General Public License as
@@ -212,7 +213,7 @@ class Sync:
         self.canonical = {alias: tag for tag, alias in config.aliases.items()}
 
     def tags_of(self, msg):
-        """The message's tags under our names; our name for a tag with an alias is the user's."""
+        """The message's tags under our names; our name for a tag with an alias is a user tag."""
         return {
             self.canonical.get(t, t)
             for t in msg.tags
