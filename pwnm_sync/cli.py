@@ -147,12 +147,13 @@ def main(
     )
 
     try:
-        open_store(syncdb, dry_run=dry_run)
+        open_store(os.path.expanduser(syncdb), dry_run=dry_run)
         clients = {}
         for entry in project.split(","):
             name = entry.split("=")[0]
             clients[name] = Client(Patchwork(api_url, name), token=patchwork_token, dry_run=dry_run)
-            clients[name].project_data()
+            maintainers = clients[name].project_data()["maintainers"]
+            sync.maintainers[name] = {user["username"]: user["id"] for user in maintainers}
 
         with database.atomic() as transaction:
             if patch_ids or msgids:
@@ -210,6 +211,8 @@ class Sync:
 
     def __init__(self, config):
         self.config = config
+        # Per project, the usernames patchwork may delegate to and their ids
+        self.maintainers = {}
         self.canonical = {alias: tag for tag, alias in config.aliases.items()}
 
     def tags_of(self, msg):
@@ -322,10 +325,7 @@ class Sync:
             click.echo(f"{label}: patchwork {changes}")
             update = dict(push)
             if push.get("delegate"):
-                # Patchwork only delegates to the project's maintainers, and wants their id
-                ids = {
-                    user["username"]: user["id"] for user in client.project_data()["maintainers"]
-                }
+                ids = self.maintainers[project]
                 if push["delegate"] not in ids:
                     click.echo(f"ERROR {push['delegate']} is not a maintainer of {project}")
                     return
@@ -333,7 +333,7 @@ class Sync:
             try:
                 client.update(patch["id"], **update)
             except PwError as e:
-                click.echo(f"ERROR {e} - are you maintainer of {project}?")
+                click.echo(f"ERROR {e}")
                 return
 
         want = self.project_tags(project, keep)
