@@ -45,13 +45,21 @@ class Config:
     states: list[str]
     batch: int
     dry_run: bool
+    # Our tag names to the ones the user wants instead
+    aliases: dict[str, str]
 
 
 def load_defaults(ctx, param, path):
-    """Take the [Defaults] section of the configuration file as the options' defaults."""
+    """Take the [Defaults] section of the configuration file as the options' defaults.
+
+    The [Aliases] section, renaming tags, goes to `ctx.meta["aliases"]`.
+    """
     if not os.path.isfile(path):
         click.echo(f"Config file {path} not found!")
         return
     config = configparser.ConfigParser()
+    config.optionxform = str  # tags are case-sensitive
     config.read(path)
     ctx.default_map = dict(config.items("Defaults"))
+    if config.has_section("Aliases"):
+        ctx.meta["aliases"] = dict(config.items("Aliases"))

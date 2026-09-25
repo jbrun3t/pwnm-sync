@@ -41,6 +41,17 @@ variables.
 | `pw-{project}-archived` | archived |
 | `pw-{project}-delegate-{user}` | delegated to that maintainer |
 
+An optional `[Aliases]` section of the configuration file renames tags:
+
+```
+[Aliases]
+pw-linux-clk = clk
+pw-linux-clk-accepted = clk/applied
+```
+
+Only the alias is synced then; a tag left under its old name is yours
+(`notmuch tag +clk -pw-linux-clk -- tag:pw-linux-clk` renames it).
+
 ## Sync
 
 Each run lists the unarchived patches of each project. For each field (state,

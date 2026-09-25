@@ -131,14 +131,18 @@ def main(
     if epoch and (patch_ids or msgids):
         raise click.UsageError("--epoch does not apply to --patch-id or --msgid")
     api_url = f"{patchwork_url.rstrip('/')}/api/{API_VERSION}"
-    # Only the configuration file sets the states
+    # Only the configuration file sets the states and the aliases
     states = (ctx.default_map or {}).get("states")
+    aliases = ctx.meta.get("aliases", {})
+    if len(set(aliases.values())) != len(aliases):
+        raise click.UsageError("[Aliases] gives the same tag to several of ours")
     sync = Sync(
         Config(
             notmuch=os.path.expanduser(notmuch_database),
             states=[s.strip() for s in states.split(",") if s.strip()] if states else STATES,
             batch=batch,
             dry_run=dry_run,
+            aliases=aliases,
         )
     )
 
@@ -206,6 +210,15 @@ class Sync:
 
     def __init__(self, config):
         self.config = config
+        self.canonical = {alias: tag for tag, alias in config.aliases.items()}
+
+    def tags_of(self, msg):
+        """The message's tags under our names; our name for a tag with an alias is the user's."""
+        return {
+            self.canonical.get(t, t)
+            for t in msg.tags
+            if t in self.canonical or t not in self.config.aliases
+        }
 
     def open_notmuch(self):
         modes = notmuch2.Database.MODE
@@ -250,7 +263,7 @@ class Sync:
 
         stored = stored_values(row)
         expected = self.owned_tags(project, self.project_tags(project, stored))
-        if self.owned_tags(project, msg.tags) != expected:
+        if self.owned_tags(project, self.tags_of(msg)) != expected:
             try:
                 patch = client.patch_data(row.id)
             except PwError as e:
@@ -278,7 +291,7 @@ class Sync:
         row = Patch.get_or_none(Patch.id == patch["id"])
         stored = stored_values(row) if row else None
         remote = patchwork_values(patch)
-        local = self.tagged_values(project, msg.tags)
+        local = self.tagged_values(project, self.tags_of(msg))
         keep, push, ambiguous = {}, {}, {}
         for field, pw in remote.items():
             if source == "notmuch":
@@ -324,7 +337,7 @@ class Sync:
                 return
 
         want = self.project_tags(project, keep)
-        self.change_tags(msg, want, self.owned_tags(project, msg.tags) - want)
+        self.change_tags(msg, want, self.owned_tags(project, self.tags_of(msg)) - want)
         Patch.replace(id=patch["id"], project=project, msgid=msgid, **keep).execute()
 
     def tagged_values(self, project, tags):
@@ -361,9 +374,11 @@ class Sync:
         return {t for t in tags if t in fixed or t.startswith(prefix + DELEGATE)}
 
     def change_tags(self, msg, add, remove):
-        tags = set(msg.tags)
-        add = add - tags
-        remove = remove & tags
+        """Add and remove tags given under our names, writing the user's aliases."""
+        tags = self.tags_of(msg)
+        alias = self.config.aliases
+        add = {alias.get(t, t) for t in add - tags}
+        remove = {alias.get(t, t) for t in remove & tags}
         if not add and not remove:
             return
 
