@@ -26,11 +26,11 @@ patchwork_token = abcdef1234567890
 
 The instance defaults to patchwork.kernel.org (`patchwork_url` otherwise), and
 the notmuch database to the one notmuch is configured with. The token, from
-your patchwork `/user/` page, is only needed to write to patchwork, which only
-accepts writes from the project maintainers. Only the file sets `states`, the
-patch states that get a tag, patchwork.kernel.org's by default. The sync
-database defaults to `~/.local/state/pwnm-sync/pwnm-sync.db`; both paths follow
-the XDG variables.
+your patchwork `/user/` page (or `PWNM_SYNC_TOKEN` in the environment), is only
+needed to write to patchwork, which only accepts writes from the project
+maintainers. Only the file sets `states`, the patch states that get a tag,
+patchwork.kernel.org's by default. The sync database defaults to
+`~/.local/state/pwnm-sync/pwnm-sync.db`; both paths follow the XDG variables.
 
 ## Tags
 

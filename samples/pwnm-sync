@@ -8,6 +8,7 @@
 project = linux-clk
 
 # Needed to write to patchwork; get it from /user/ on the instance.
+# PWNM_SYNC_TOKEN in the environment overrides it.
 #patchwork_token = abcdef1234567890
 
 #patchwork_url = https://patchwork.kernel.org

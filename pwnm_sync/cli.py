@@ -57,6 +57,8 @@ DELEGATE = "delegate-"
 @click.option(
     "-t",
     "--patchwork-token",
+    envvar="PWNM_SYNC_TOKEN",
+    show_envvar=True,
     help="Your Patchwork API token. Get it from /user/ on your patchwork instance.",
 )
 @click.option(
