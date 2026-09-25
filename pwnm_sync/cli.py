@@ -152,8 +152,9 @@ def main(
         clients = {}
         for name in filter(None, (p.strip() for p in project.split(","))):
             clients[name] = Client(Patchwork(api_url, name), token=patchwork_token, dry_run=dry_run)
+            # Their ids there are profile ids, not the user ids a delegate takes
             maintainers = clients[name].project_data()["maintainers"]
-            sync.maintainers[name] = {user["username"]: user["id"] for user in maintainers}
+            sync.maintainers[name] = {user["username"] for user in maintainers}
 
         with database.atomic() as transaction:
             if patch_ids or msgids:
@@ -211,8 +212,10 @@ class Sync:
 
     def __init__(self, config):
         self.config = config
-        # Per project, the usernames patchwork may delegate to and their ids
+        # Per project, the usernames patchwork may delegate to
         self.maintainers = {}
+        # Patchwork user ids by username, looked up once per run
+        self.user_ids = {}
         self.canonical = {alias: tag for tag, alias in config.aliases.items()}
 
     def tags_of(self, msg):
@@ -327,14 +330,17 @@ class Sync:
                 f"{field} {remote[field]} -> {value}" for field, value in push.items()
             )
             click.echo(f"{label}: patchwork {changes}")
-            update = dict(push)
-            if push.get("delegate"):
-                ids = self.maintainers[project]
-                if push["delegate"] not in ids:
-                    click.echo(f"ERROR {push['delegate']} is not a maintainer of {project}")
-                    return
-                update["delegate"] = ids[push["delegate"]]
+            if push.get("delegate") and push["delegate"] not in self.maintainers[project]:
+                click.echo(f"ERROR {push['delegate']} is not a maintainer of {project}")
+                return
             try:
+                update = dict(push)
+                if name := push.get("delegate"):
+                    if name not in self.user_ids:
+                        self.user_ids[name] = client.user_id(name)
+                    if self.user_ids[name] is None:
+                        raise PwError(f"no patchwork user {name}")
+                    update["delegate"] = self.user_ids[name]
                 client.update(patch["id"], **update)
             except PwError as e:
                 click.echo(f"ERROR {e}")

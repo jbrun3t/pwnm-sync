@@ -106,6 +106,13 @@ class Client:
     def patch_data(self, patch_id: int) -> dict:
         return self._document(f"patches/{patch_id}")
 
+    def user_id(self, username: str) -> int | None:
+        """The id of the user with this username; listing users needs a token."""
+        for user in self._list("users", q=username):
+            if user["username"] == username:
+                return user["id"]
+        return None
+
     def update(
         self,
         patch_id: int,
