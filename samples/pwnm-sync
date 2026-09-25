@@ -26,9 +26,14 @@ project = linux-foo
 #  handled-elsewhere, not-applicable, superseded, accepted, rejected, deferred,
 #  rfc
 
-# Optional: our tag names on the left, the ones to use instead on the right.
-# Only the alias is synced; a tag left under its old name is yours.
+# Optional: the prefix a project's tags are named after, pw-{project} otherwise.
+#[Prefixes]
+#linux-foo = pw-foo
+
+# Optional: tag names on the left, after the prefix change, and the ones to use
+# instead on the right. Only the new names are synced; tags left under their
+# old names are yours.
 #[Aliases]
-#pw-linux-foo = foo
-#pw-linux-foo-accepted = foo/applied
-#pw-linux-foo-delegate-jdoe = foo/mine
+#patchwork = pw
+#pw-foo-accepted = foo/applied
+#pw-foo-delegate-jdoe = foo/mine

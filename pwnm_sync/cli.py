@@ -131,7 +131,7 @@ def main(
     if epoch and (patch_ids or msgids):
         raise click.UsageError("--epoch does not apply to --patch-id or --msgid")
     api_url = f"{patchwork_url.rstrip('/')}/api/{API_VERSION}"
-    # Only the configuration file sets the states and the aliases
+    # Only the configuration file sets the states, the prefixes and the aliases
     states = (ctx.default_map or {}).get("states")
     aliases = ctx.meta.get("aliases", {})
     if len(set(aliases.values())) != len(aliases):
@@ -142,6 +142,7 @@ def main(
             states=[s.strip() for s in states.split(",") if s.strip()] if states else STATES,
             batch=batch,
             dry_run=dry_run,
+            prefixes=ctx.meta.get("prefixes", {}),
             aliases=aliases,
         )
     )
@@ -221,6 +222,10 @@ class Sync:
             for t in msg.tags
             if t in self.canonical or t not in self.config.aliases
         }
+
+    def prefix(self, project):
+        """The tag telling a message is a patch of the project, which names its other tags."""
+        return self.config.prefixes.get(project, f"pw-{project}")
 
     def open_notmuch(self):
         modes = notmuch2.Database.MODE
@@ -344,7 +349,7 @@ class Sync:
 
         No archived tag means not archived, and no delegate tag no delegate.
         """
-        prefix = f"pw-{project}-"
+        prefix = self.prefix(project) + "-"
         delegates = {
             t.removeprefix(prefix + DELEGATE) for t in tags if t.startswith(prefix + DELEGATE)
         }
@@ -356,8 +361,8 @@ class Sync:
 
     def project_tags(self, project, values):
         """The tags a message carries for a patch of the project with these values."""
-        prefix = f"pw-{project}-"
-        tags = {"patchwork", f"pw-{project}"}
+        prefix = self.prefix(project) + "-"
+        tags = {"patchwork", self.prefix(project)}
         if values["state"] in self.config.states:
             tags.add(prefix + values["state"])
         if values["archived"]:
@@ -368,7 +373,7 @@ class Sync:
 
     def owned_tags(self, project, tags):
         """The tags among `tags` that carry a field of the project's patches."""
-        prefix = f"pw-{project}-"
+        prefix = self.prefix(project) + "-"
         fixed = {prefix + v for v in [*self.config.states, ARCHIVED]}
         return {t for t in tags if t in fixed or t.startswith(prefix + DELEGATE)}
 

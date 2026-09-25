@@ -41,16 +41,20 @@ patchwork.kernel.org's by default. The sync database defaults to
 | `pw-{project}-archived` | archived |
 | `pw-{project}-delegate-{user}` | delegated to that maintainer |
 
-An optional `[Aliases]` section of the configuration file renames tags:
+In the configuration file, an optional `[Prefixes]` section names a project's
+tags after another prefix than `pw-{project}`, and an optional `[Aliases]`
+section renames single tags, by their names after the prefix change:
 
 ```
+[Prefixes]
+linux-foo = pw-foo
+
 [Aliases]
-pw-linux-foo = foo
-pw-linux-foo-accepted = foo/applied
+patchwork = pw
+pw-foo-accepted = foo/applied
 ```
 
-Only the alias is synced then; a tag left under its old name is yours
-(`notmuch tag +foo -pw-linux-foo -- tag:pw-linux-foo` renames it).
+Only the new names are synced then; tags left under their old names are yours.
 
 ## Sync
 

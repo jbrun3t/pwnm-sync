@@ -46,6 +46,8 @@ class Config:
     states: list[str]
     batch: int
     dry_run: bool
+    # Per project, the tag its tags are named after, pw-{project} otherwise
+    prefixes: dict[str, str]
     # Our tag names to the ones the user wants instead
     aliases: dict[str, str]
 
@@ -53,7 +55,7 @@ class Config:
 def load_defaults(ctx, param, path):
     """Take the [Defaults] section of the configuration file as the options' defaults.
 
-    The [Aliases] section, renaming tags, goes to `ctx.meta["aliases"]`.
+    The [Prefixes] and [Aliases] sections, naming tags, go to `ctx.meta`.
     """
     if not os.path.isfile(path):
         if ctx.get_parameter_source(param.name) is not ParameterSource.DEFAULT:
@@ -63,5 +65,6 @@ def load_defaults(ctx, param, path):
     config.optionxform = str  # tags are case-sensitive
     config.read(path)
     ctx.default_map = dict(config.items("Defaults"))
-    if config.has_section("Aliases"):
-        ctx.meta["aliases"] = dict(config.items("Aliases"))
+    for section in ("Prefixes", "Aliases"):
+        if config.has_section(section):
+            ctx.meta[section.lower()] = dict(config.items(section))
