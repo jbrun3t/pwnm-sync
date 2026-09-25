@@ -15,8 +15,17 @@ dependencies = [
     "requests-futures",
 ]
 
+[project.optional-dependencies]
+dev = ["ruff~=0.16.0"]
+
 [project.scripts]
 pwnm-sync = "pwnm_sync.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["pwnm_sync"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+extend-select = ["I", "UP", "B", "SIM", "RUF"]
