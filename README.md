@@ -56,6 +56,8 @@ notmuch are skipped (`--debug` lists them).
 
 `--dry-run` prints the changes and writes nothing. `--patch-id` and `--msgid`
 sync only those patches; `--from patchwork|notmuch` forces the direction.
+`--epoch DATE` lists the patches since DATE, archived or not, to tag an older
+notmuch database.
 
 If the sync database was written by another version, delete it: the next run
 rebuilds it, taking patchwork's values.

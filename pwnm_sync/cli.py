@@ -129,6 +129,12 @@ def load_config(ctx, param, path):
     type=click.Choice(["patchwork", "notmuch"]),
     help="With --patch-id or --msgid: take this side's state, whichever side moved.",
 )
+@click.option(
+    "-e",
+    "--epoch",
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    help="List the patches since this date, archived or not, rather than every unarchived one.",
+)
 @click.option("--debug", is_flag=True, help="Also report patches whose message notmuch lacks.")
 def main(
     notmuch_database,
@@ -140,6 +146,7 @@ def main(
     patch_ids,
     msgids,
     source,
+    epoch,
     debug,
 ):
     """Sync patch state between Patchwork and Notmuch."""
@@ -148,6 +155,8 @@ def main(
         log.setLevel(logging.DEBUG)
     if source and not (patch_ids or msgids):
         raise click.UsageError("--from needs --patch-id or --msgid")
+    if epoch and (patch_ids or msgids):
+        raise click.UsageError("--epoch does not apply to --patch-id or --msgid")
     nmdb = os.path.expanduser(notmuch_database)
     api_url = f"{patchwork_url.rstrip('/')}/api/{API_VERSION}"
 
@@ -167,7 +176,7 @@ def main(
                         sync_patch(clients[name], db, name, patch, dry_run, source)
             else:
                 for name, client in clients.items():
-                    sync_project(client, nmdb, name, dry_run)
+                    sync_project(client, nmdb, name, dry_run, epoch and epoch.astimezone())
 
             if dry_run:
                 transaction.rollback()
@@ -206,11 +215,12 @@ def find_patches(clients, patch_ids, msgids):
     return found
 
 
-def sync_project(client, nmdb, project, dry_run):
-    """Sync the project's unarchived patches, then the stored ones patchwork no longer lists."""
+def sync_project(client, nmdb, project, dry_run, epoch=None):
+    """Sync the project's unarchived patches, or all since `epoch`, then the stored ones not listed."""
     click.echo(f"Looking at project {project}")
     listed = set()
-    for batch in itertools.batched(client.patch_list(archived=False), BATCH):
+    patches = client.patch_list(since=epoch) if epoch else client.patch_list(archived=False)
+    for batch in itertools.batched(patches, BATCH):
         # We open the DB for each batch as to not hold the notmuch
         # database open blocking other writers for too long.
         with open_notmuch(nmdb, dry_run) as db, db.atomic():
@@ -224,15 +234,17 @@ def sync_project(client, nmdb, project, dry_run):
     if unlisted:
         with open_notmuch(nmdb, dry_run) as db, db.atomic():
             for row in unlisted:
-                sync_unlisted(client, db, project, row, dry_run)
+                sync_unlisted(client, db, project, row, dry_run, archived=not epoch)
 
     click.echo(f"Finished processing {len(listed)} {project} patches!")
 
 
-def sync_unlisted(client, db, project, row, dry_run):
-    """Sync a stored patch patchwork no longer lists, taken as archived there.
+def sync_unlisted(client, db, project, row, dry_run, archived=True):
+    """Sync a stored patch missing from the listing.
 
-    Its values are known without asking patchwork until the tags move away from them.
+    Missing means archived in patchwork when `archived` is true; a listing by date also
+    misses older patches. Its values are known without asking patchwork until the tags
+    move away from them.
     """
     try:
         msg = db.find(row.msgid)
@@ -248,7 +260,7 @@ def sync_unlisted(client, db, project, row, dry_run):
             click.echo(f"patch {row.id} <{row.msgid}>: {e}")
             return
         sync_patch(client, db, project, patch, dry_run)
-    elif not row.archived:
+    elif archived and not row.archived:
         change_tags(msg, project_tags(project, stored | {"archived": True}), set(), dry_run)
         row.archived = True
         row.save()
