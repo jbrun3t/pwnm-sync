@@ -1,0 +1,33 @@
+# pwnm-sync configuration: copy to ~/.config/pwnm-sync
+#
+# [Defaults] gives the options their default values, under the option's long
+# name with dashes as underscores. The command line overrides them.
+
+[Defaults]
+# Patchwork projects to sync, comma separated. Required, here or with -p.
+project = linux-clk
+
+# Needed to write to patchwork; get it from /user/ on the instance.
+#patchwork_token = abcdef1234567890
+
+#patchwork_url = https://patchwork.kernel.org
+
+# The notmuch database; the one notmuch is configured with when unset.
+#notmuch_database = ~/.mail
+
+#syncdb = ~/.local/state/pwnm-sync/pwnm-sync.db
+
+# Patches handled while the notmuch database is held open for writing.
+#batch = 250
+
+# Patch states that get a tag, comma separated; only settable here.
+#states = new, under-review, changes-requested, awaiting-upstream,
+#  handled-elsewhere, not-applicable, superseded, accepted, rejected, deferred,
+#  rfc
+
+# Optional: our tag names on the left, the ones to use instead on the right.
+# Only the alias is synced; a tag left under its old name is yours.
+#[Aliases]
+#pw-linux-clk = clk
+#pw-linux-clk-accepted = clk/applied
+#pw-linux-clk-delegate-jbrunet = clk/mine

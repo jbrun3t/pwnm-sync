@@ -16,7 +16,7 @@ python3 -m venv .venv
 ## Configure
 
 Options (see `pwnm-sync --help`) default from the `[Defaults]` section of
-`~/.config/pwnm-sync`:
+`~/.config/pwnm-sync`; `samples/pwnm-sync` lists every setting:
 
 ```
 [Defaults]
