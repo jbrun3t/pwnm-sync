@@ -1,4 +1,4 @@
-# pwnm-sync
+# pwnm-sync (v2)
 
 Sync patch state between patchwork and notmuch tags, both ways.
 
@@ -20,7 +20,7 @@ Options (see `pwnm-sync --help`) default from the `[Defaults]` section of
 
 ```
 [Defaults]
-project = linux-clk,linux-amlogic
+project = linux-blabla
 patchwork_token = abcdef1234567890
 ```
 
@@ -45,12 +45,12 @@ An optional `[Aliases]` section of the configuration file renames tags:
 
 ```
 [Aliases]
-pw-linux-clk = clk
-pw-linux-clk-accepted = clk/applied
+pw-linux-foo = foo
+pw-linux-foo-accepted = foo/applied
 ```
 
 Only the alias is synced then; a tag left under its old name is yours
-(`notmuch tag +clk -pw-linux-clk -- tag:pw-linux-clk` renames it).
+(`notmuch tag +foo -pw-linux-foo -- tag:pw-linux-foo` renames it).
 
 ## Sync
 
@@ -80,9 +80,3 @@ rebuilds it, taking patchwork's values.
 ## License
 
 GPLv3+, see `LICENSE`. `pwnm_sync/patchwork.py` is MIT.
-
-## Contributing
-
-Send patches to stewart@flamingspork.com or use a GitHub pull request.
-Contributions must follow the [Developer Certificate of
-Origin](https://developercertificate.org/).
