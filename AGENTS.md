@@ -29,4 +29,5 @@ of each synced project; when trying things, sync only a few patches with
 
 Do not run the tool against the real notmuch database or sync database. Copy
 the `.notmuch` directory and point `--notmuch-database` and `--syncdb` at the
-copies.
+copies. notmuch2 refuses to open a database without a notmuch configuration:
+when pointing `XDG_CONFIG_HOME` elsewhere, set `NOTMUCH_CONFIG` to the real one.

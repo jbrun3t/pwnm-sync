@@ -20,24 +20,24 @@ Options (see `pwnm-sync --help`) default from the `[Defaults]` section of
 
 ```
 [Defaults]
-notmuch_database = ~/.mail
 project = linux-clk,linux-amlogic
 patchwork_token = abcdef1234567890
 ```
 
-The instance defaults to patchwork.kernel.org (`patchwork_url` otherwise). The
-token, from your patchwork `/user/` page, is only needed to write to patchwork,
-which only accepts writes from the project maintainers. Only the file sets
-`states`, the patch states that get a tag, patchwork.kernel.org's by default. The sync database
-defaults to `~/.local/state/pwnm-sync/pwnm-sync.db`; both paths follow the XDG
-variables.
+The instance defaults to patchwork.kernel.org (`patchwork_url` otherwise), and
+the notmuch database to the one notmuch is configured with. The token, from
+your patchwork `/user/` page, is only needed to write to patchwork, which only
+accepts writes from the project maintainers. Only the file sets `states`, the
+patch states that get a tag, patchwork.kernel.org's by default. The sync
+database defaults to `~/.local/state/pwnm-sync/pwnm-sync.db`; both paths follow
+the XDG variables.
 
 ## Tags
 
 | Tag | Meaning |
 |---|---|
 | `patchwork`, `pw-{project}` | the message is a patch in the project |
-| `pw-{project}-{state}` | its state, among patchwork.kernel.org's |
+| `pw-{project}-{state}` | its state, if among the configured `states` |
 | `pw-{project}-archived` | archived |
 | `pw-{project}-delegate-{user}` | delegated to that maintainer |
 
