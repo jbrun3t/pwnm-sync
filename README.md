@@ -34,7 +34,7 @@ My ~/.pwnm-sync.ini config file looks like:
 ```
 [Defaults]
 patchwork_token=abcdef1234567890
-sync: skiboot=skiboot@lists.ozlabs.org,linuxppc-dev=linuxppc-dev@lists.ozlabs.org
+sync: skiboot,linuxppc-dev
 ```
 
 This means I take the defaults for other config options (see --help),
@@ -86,7 +86,8 @@ counts as a state change. When the state tags are ambiguous (two new
 states), the patchwork state is applied back.
 
 Only patches that are not archived in patchwork are synced. Once a patch
-is archived it leaves the sync and its tags stay as they were last set.
+is archived it leaves the sync: its message gets a pw-{project}-archived
+tag and its state tag stays as it was last set.
 
 Run with `--dry-run` to see what would change without writing to
 patchwork, notmuch or the sync database.

@@ -6,7 +6,7 @@ import peewee
 
 from . import Error
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 database = peewee.SqliteDatabase(None)
 
@@ -23,6 +23,7 @@ class Patch(peewee.Model):
 
     id = peewee.IntegerField(primary_key=True)  # patchwork's patch id
     project = peewee.TextField(index=True)
+    msgid = peewee.TextField()
     state = peewee.TextField()
 
     class Meta:

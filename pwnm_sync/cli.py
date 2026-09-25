@@ -17,7 +17,6 @@
 # SPDX-License-Identifier:  GPL-3.0-or-later
 
 import configparser
-import datetime
 import itertools
 import os
 
@@ -47,6 +46,8 @@ STATES = [
     "deferred",
     "rfc",
 ]
+# Tagged on the message of a patch patchwork no longer lists
+ARCHIVED = "archived"
 
 
 def load_config(ctx, param, path):
@@ -96,14 +97,9 @@ def load_config(ctx, param, path):
 @click.option(
     "-s",
     "--sync",
-    default="skiboot=skiboot@lists.ozlabs.org",
-    help="Projects and lists to sync. In the format project1=list1@server1,project2=list2@server2",
-)
-@click.option(
-    "-e",
-    "--epoch",
-    type=click.DateTime(formats=["%Y-%m-%d"]),
-    help="Only consider patches on or after this date",
+    default="skiboot",
+    help="Patchwork projects to sync, comma separated. "
+    "A project=list entry is accepted, the list is not used.",
 )
 @click.option(
     "-n",
@@ -111,19 +107,16 @@ def load_config(ctx, param, path):
     is_flag=True,
     help="Print what would change, without writing to patchwork, notmuch or the syncdb",
 )
-def main(notmuch_database, syncdb, patchwork_token, patchwork_url, sync, epoch, dry_run):
+def main(notmuch_database, syncdb, patchwork_token, patchwork_url, sync, dry_run):
     """Sync patch state between Patchwork and Notmuch."""
     nmdb = os.path.expanduser(notmuch_database)
     api_url = f"{patchwork_url.rstrip('/')}/api/{API_VERSION}"
-    if epoch is not None:
-        # Naive UTC, see get_oldest_nm_message()
-        epoch = epoch.astimezone(datetime.UTC).replace(tzinfo=None)
 
     try:
         open_store(syncdb, dry_run=dry_run)
         with database.atomic() as transaction:
             for project in sync.split(","):
-                project_name, project_list = project.split("=")
+                project_name = project.split("=")[0]
                 client = Client(
                     Patchwork(api_url, project_name),
                     token=patchwork_token,
@@ -132,14 +125,7 @@ def main(notmuch_database, syncdb, patchwork_token, patchwork_url, sync, epoch, 
                 project_id = client.project_data()["id"]
 
                 click.echo(f"Looking at project {project_name} (id {project_id})")
-                if epoch is None:
-                    with notmuch2.Database(nmdb) as db:
-                        oldest_msg = get_oldest_nm_message(db, project_list)
-                else:
-                    oldest_msg = epoch
-
-                click.echo(f"Going to look at things post {oldest_msg}")
-                sync_project(client, nmdb, project_name, oldest_msg, dry_run)
+                sync_project(client, nmdb, project_name, dry_run)
 
             if dry_run:
                 transaction.rollback()
@@ -147,17 +133,11 @@ def main(notmuch_database, syncdb, patchwork_token, patchwork_url, sync, epoch, 
         raise click.ClickException(str(e)) from e
 
 
-def get_oldest_nm_message(db, project_list):
-    msgs = db.messages(f"to:{project_list}", sort=notmuch2.Database.SORT.OLDEST_FIRST)
-    # Naive UTC, as patchwork stores the patch dates its filters compare against
-    return datetime.datetime.fromtimestamp(next(msgs).date, datetime.UTC).replace(tzinfo=None)
-
-
-def sync_project(client, nmdb, project, since, dry_run):
-    """Sync the project's unarchived patches; the others leave the sync."""
+def sync_project(client, nmdb, project, dry_run):
+    """Sync the project's unarchived patches; the others leave the sync, tagged archived."""
     mode = notmuch2.Database.MODE.READ_ONLY if dry_run else notmuch2.Database.MODE.READ_WRITE
     listed = set()
-    for batch in itertools.batched(client.patch_list(since=since, archived=False), BATCH):
+    for batch in itertools.batched(client.patch_list(archived=False), BATCH):
         # We open the DB for each batch as to not hold the notmuch
         # database open blocking other writers for too long.
         with notmuch2.Database(nmdb, mode=mode) as db, db.atomic():
@@ -165,10 +145,18 @@ def sync_project(client, nmdb, project, since, dry_run):
                 listed.add(patch["id"])
                 sync_patch(client, db, project, patch, dry_run)
 
-    for row in Patch.select().where(Patch.project == project):
-        if row.id not in listed:
-            click.echo(f"patch {row.id}: leaves the sync")
-            row.delete_instance()
+    gone = [row for row in Patch.select().where(Patch.project == project) if row.id not in listed]
+    if gone:
+        with notmuch2.Database(nmdb, mode=mode) as db, db.atomic():
+            for row in gone:
+                click.echo(f"patch {row.id}: leaves the sync")
+                try:
+                    msg = db.find(row.msgid)
+                except LookupError:
+                    pass
+                else:
+                    change_tags(msg, {f"pw-{project}-{ARCHIVED}"}, set(), dry_run)
+                row.delete_instance()
 
     click.echo(f"Finished processing {len(listed)} {project} patches!")
 
@@ -203,17 +191,25 @@ def sync_patch(client, db, project, patch, dry_run):
                 click.echo(f"ERROR {e} - are you maintainer of {project}?")
                 return
 
-    retag(msg, project, state, dry_run)
-    Patch.replace(id=patch["id"], project=project, state=state).execute()
+    retag(msg, project, state, patch["archived"], dry_run)
+    Patch.replace(id=patch["id"], project=project, msgid=msgid, state=state).execute()
 
 
-def retag(msg, project, state, dry_run):
-    tags = set(msg.tags)
+def retag(msg, project, state, archived, dry_run):
+    """Set the message's tags for the project to the patch's state."""
     want = {"patchwork", f"pw-{project}"}
     if state in STATES:
         want.add(f"pw-{project}-{state}")
-    add = want - tags
-    remove = ({f"pw-{project}-{s}" for s in STATES} - want) & tags
+    if archived:
+        want.add(f"pw-{project}-{ARCHIVED}")
+    ours = {f"pw-{project}-{s}" for s in [*STATES, ARCHIVED]}
+    change_tags(msg, want, ours - want, dry_run)
+
+
+def change_tags(msg, add, remove, dry_run):
+    tags = set(msg.tags)
+    add = add - tags
+    remove = remove & tags
     if not add and not remove:
         return
 
