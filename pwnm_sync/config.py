@@ -7,6 +7,7 @@ from typing import NamedTuple
 
 import click
 import platformdirs
+from click.core import ParameterSource
 
 from . import NAME
 
@@ -41,7 +42,7 @@ class Patchwork(NamedTuple):
 class Config:
     """How a run treats the notmuch side."""
 
-    notmuch: str
+    notmuch: str | None  # None for the one notmuch is configured with
     states: list[str]
     batch: int
     dry_run: bool
@@ -55,7 +56,8 @@ def load_defaults(ctx, param, path):
     The [Aliases] section, renaming tags, goes to `ctx.meta["aliases"]`.
     """
     if not os.path.isfile(path):
-        click.echo(f"Config file {path} not found!")
+        if ctx.get_parameter_source(param.name) is not ParameterSource.DEFAULT:
+            click.echo(f"Config file {path} not found!")
         return
     config = configparser.ConfigParser()
     config.optionxform = str  # tags are case-sensitive

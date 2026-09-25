@@ -45,15 +45,13 @@ DELEGATE = "delegate-"
 @click.option(
     "-m",
     "--notmuch-database",
-    default=os.path.expanduser("~/Maildir/INBOX"),
-    help="The notmuch database to sync",
+    help="The notmuch database to sync, the one notmuch is configured with by default.",
 )
 @click.option(
     "-d",
     "--syncdb",
     default=SYNCDB,
-    help="The path to the sqlite3 database that pwnm-sync uses to keep track of the state "
-    "of the local notmuch and remote patchwork databases.",
+    help="Where pwnm-sync keeps the values patchwork and notmuch last agreed on.",
 )
 @click.option(
     "-t",
@@ -64,14 +62,13 @@ DELEGATE = "delegate-"
     "-u",
     "--patchwork-url",
     default="https://patchwork.kernel.org",
-    help="The URL to your patchwork instance. Must support REST API.",
+    help="The patchwork instance, 3.1 or later (REST API 1.3).",
 )
 @click.option(
     "-p",
     "--project",
     required=True,
-    help="Patchwork projects to sync, comma separated. "
-    "A project=list entry is accepted, the list is not used.",
+    help="Patchwork projects to sync, comma separated.",
 )
 @click.option(
     "--batch",
@@ -138,7 +135,7 @@ def main(
         raise click.UsageError("[Aliases] gives the same tag to several of ours")
     sync = Sync(
         Config(
-            notmuch=os.path.expanduser(notmuch_database),
+            notmuch=os.path.expanduser(notmuch_database) if notmuch_database else None,
             states=[s.strip() for s in states.split(",") if s.strip()] if states else STATES,
             batch=batch,
             dry_run=dry_run,
@@ -149,8 +146,7 @@ def main(
     try:
         open_store(os.path.expanduser(syncdb), dry_run=dry_run)
         clients = {}
-        for entry in project.split(","):
-            name = entry.split("=")[0]
+        for name in filter(None, (p.strip() for p in project.split(","))):
             clients[name] = Client(Patchwork(api_url, name), token=patchwork_token, dry_run=dry_run)
             maintainers = clients[name].project_data()["maintainers"]
             sync.maintainers[name] = {user["username"]: user["id"] for user in maintainers}
