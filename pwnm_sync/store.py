@@ -6,7 +6,7 @@ import peewee
 
 from . import Error
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 database = peewee.SqliteDatabase(None)
 
@@ -16,7 +16,7 @@ class StoreError(Error):
 
 
 class Patch(peewee.Model):
-    """A synced patch and the state both sides agreed on at the end of the last run.
+    """A synced patch and the values both sides agreed on at the end of the last run.
 
     Telling which side moved since then decides the direction of the sync.
     """
@@ -25,6 +25,7 @@ class Patch(peewee.Model):
     project = peewee.TextField(index=True)
     msgid = peewee.TextField()
     state = peewee.TextField()
+    archived = peewee.BooleanField()
 
     class Meta:
         database = database

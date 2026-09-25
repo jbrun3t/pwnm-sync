@@ -49,7 +49,6 @@ STATES = [
     "deferred",
     "rfc",
 ]
-# Tagged on the message of a patch patchwork no longer lists
 ARCHIVED = "archived"
 
 
@@ -207,7 +206,7 @@ def find_patches(clients, patch_ids, msgids):
 
 
 def sync_project(client, nmdb, project, dry_run):
-    """Sync the project's unarchived patches; the others leave the sync, tagged archived."""
+    """Sync the project's unarchived patches, then the stored ones patchwork no longer lists."""
     click.echo(f"Looking at project {project}")
     listed = set()
     for batch in itertools.batched(client.patch_list(archived=False), BATCH):
@@ -218,72 +217,128 @@ def sync_project(client, nmdb, project, dry_run):
                 listed.add(patch["id"])
                 sync_patch(client, db, project, patch, dry_run)
 
-    gone = [row for row in Patch.select().where(Patch.project == project) if row.id not in listed]
-    if gone:
+    unlisted = [
+        row for row in Patch.select().where(Patch.project == project) if row.id not in listed
+    ]
+    if unlisted:
         with open_notmuch(nmdb, dry_run) as db, db.atomic():
-            for row in gone:
-                click.echo(f"patch {row.id}: leaves the sync")
-                try:
-                    msg = db.find(row.msgid)
-                except LookupError:
-                    pass
-                else:
-                    change_tags(msg, {f"pw-{project}-{ARCHIVED}"}, set(), dry_run)
-                row.delete_instance()
+            for row in unlisted:
+                sync_unlisted(client, db, project, row, dry_run)
 
     click.echo(f"Finished processing {len(listed)} {project} patches!")
+
+
+def sync_unlisted(client, db, project, row, dry_run):
+    """Sync a stored patch patchwork no longer lists, taken as archived there.
+
+    Its values are known without asking patchwork until the tags move away from them.
+    """
+    try:
+        msg = db.find(row.msgid)
+    except LookupError:
+        row.delete_instance()
+        return
+
+    stored = stored_values(row)
+    if owned_tags(project, msg.tags) != owned_tags(project, project_tags(project, stored)):
+        try:
+            patch = client.patch_data(row.id)
+        except PwError as e:
+            click.echo(f"patch {row.id} <{row.msgid}>: {e}")
+            return
+        sync_patch(client, db, project, patch, dry_run)
+    elif not row.archived:
+        change_tags(msg, project_tags(project, stored | {"archived": True}), set(), dry_run)
+        row.archived = True
+        row.save()
 
 
 def sync_patch(client, db, project, patch, dry_run, source=None):
     """Carry over whichever side moved since the last run, or the `source` side when given.
 
-    Patchwork wins when both moved, or when the local state tags are ambiguous.
+    Each field is reconciled on its own. Patchwork wins when both sides moved, when the
+    patch was never synced, or when the tags give several new values.
     """
     msgid = patch["msgid"][1:-1]
     try:
         msg = db.find(msgid)
     except LookupError:
         log.debug("MESSAGE NOT FOUND: 'id:%s' - skipping", msgid)
+        Patch.delete_by_id(patch["id"])
         return
 
     row = Patch.get_or_none(Patch.id == patch["id"])
-    state = patch["state"]
-    tagged = {s for s in STATES if f"pw-{project}-{s}" in msg.tags}
-    if source == "notmuch":
-        if len(tagged) != 1:
-            click.echo(f"patch {patch['id']} <{msgid}>: tagged {sorted(tagged)} - cannot push")
-            return
-        local = tagged - {state}
-    elif source is None and row and state == row.state:
-        # Patchwork did not move: a state tag other than the agreed one is a local change
-        local = tagged - {row.state}
-    else:
-        local = set()
+    stored = stored_values(row) if row else None
+    remote = patchwork_values(patch)
+    local = tagged_values(project, msg.tags)
+    keep, push, ambiguous = {}, {}, {}
+    for field, pw in remote.items():
+        if source == "notmuch":
+            base = pw  # any other value the tags hold is pushed
+        elif source == "patchwork" or stored is None:
+            keep[field] = pw
+            continue
+        else:
+            base = stored[field]
+        moved = local[field] - {base}
+        if pw != base or not moved:
+            keep[field] = pw
+        elif len(moved) == 1:
+            keep[field] = push[field] = moved.pop()
+        else:
+            keep[field] = pw
+            ambiguous[field] = moved
 
-    if len(local) > 1:
-        click.echo(f"patch {patch['id']} <{msgid}>: tagged {sorted(local)} - taking patchwork's")
-    elif local:
-        state = local.pop()
-        click.echo(f"patch {patch['id']} <{msgid}>: patchwork {patch['state']} -> {state}")
+    label = f"patch {patch['id']} <{msgid}>"
+    for field, values in ambiguous.items():
+        click.echo(f"{label}: {field} tagged {sorted(values, key=str)} - taking patchwork's")
+    if ambiguous and source == "notmuch":
+        return
+    if push:
+        changes = ", ".join(f"{field} {remote[field]} -> {value}" for field, value in push.items())
+        click.echo(f"{label}: patchwork {changes}")
         try:
-            client.update(patch["id"], state=state)
+            client.update(patch["id"], **push)
         except PwError as e:
             click.echo(f"ERROR {e} - are you maintainer of {project}?")
             return
 
-    retag(msg, project, state, patch["archived"], dry_run)
-    Patch.replace(id=patch["id"], project=project, msgid=msgid, state=state).execute()
+    want = project_tags(project, keep)
+    change_tags(msg, want, owned_tags(project, msg.tags) - want, dry_run)
+    Patch.replace(id=patch["id"], project=project, msgid=msgid, **keep).execute()
 
 
-def retag(msg, project, state, archived, dry_run):
-    """Set the message's tags for the project to the patch's state."""
-    want = {"patchwork", f"pw-{project}"}
-    if state in STATES:
-        want.add(f"pw-{project}-{state}")
-    if archived:
-        want.add(f"pw-{project}-{ARCHIVED}")
-    ours = {f"pw-{project}-{s}" for s in [*STATES, ARCHIVED]}
-    change_tags(msg, want, ours - want, dry_run)
+def patchwork_values(patch):
+    return {"state": patch["state"], "archived": patch["archived"]}
+
+
+def stored_values(row):
+    return {"state": row.state, "archived": row.archived}
+
+
+def tagged_values(project, tags):
+    """The values the message's tags give each field; an absent archived tag means False."""
+    prefix = f"pw-{project}-"
+    return {
+        "state": {s for s in STATES if prefix + s in tags},
+        "archived": {prefix + ARCHIVED in tags},
+    }
+
+
+def project_tags(project, values):
+    """The tags a message carries for a patch of the project with these values."""
+    prefix = f"pw-{project}-"
+    tags = {"patchwork", f"pw-{project}"}
+    if values["state"] in STATES:
+        tags.add(prefix + values["state"])
+    if values["archived"]:
+        tags.add(prefix + ARCHIVED)
+    return tags
+
+
+def owned_tags(project, tags):
+    """The tags among `tags` that carry a field of the project's patches."""
+    return {t for t in tags if t in {f"pw-{project}-{v}" for v in [*STATES, ARCHIVED]}}
 
 
 def change_tags(msg, add, remove, dry_run):
