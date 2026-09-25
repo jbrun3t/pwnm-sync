@@ -18,6 +18,7 @@
 
 import configparser
 import itertools
+import logging
 import os
 
 import click
@@ -28,9 +29,11 @@ from .config import Patchwork
 from .patchwork import Client, PwError
 from .store import Patch, database, open_store
 
+log = logging.getLogger(__name__)
+
 API_VERSION = "1.3"
 # Patches handled while the notmuch database is held open for writing
-BATCH = 100
+BATCH = 250
 
 # The states patchwork.kernel.org serves; a patch in another state gets no state tag
 STATES = [
@@ -89,15 +92,15 @@ def load_config(ctx, param, path):
     help="Your Patchwork API token. Get it from /user/ on your patchwork instance.",
 )
 @click.option(
-    "-p",
+    "-u",
     "--patchwork-url",
-    default="https://patchwork.ozlabs.org",
+    default="https://patchwork.kernel.org",
     help="The URL to your patchwork instance. Must support REST API.",
 )
 @click.option(
-    "-s",
-    "--sync",
-    default="skiboot",
+    "-p",
+    "--project",
+    required=True,
     help="Patchwork projects to sync, comma separated. "
     "A project=list entry is accepted, the list is not used.",
 )
@@ -126,18 +129,23 @@ def load_config(ctx, param, path):
     type=click.Choice(["patchwork", "notmuch"]),
     help="With --patch-id or --msgid: take this side's state, whichever side moved.",
 )
+@click.option("--debug", is_flag=True, help="Also report patches whose message notmuch lacks.")
 def main(
     notmuch_database,
     syncdb,
     patchwork_token,
     patchwork_url,
-    sync,
+    project,
     dry_run,
     patch_ids,
     msgids,
     source,
+    debug,
 ):
     """Sync patch state between Patchwork and Notmuch."""
+    logging.basicConfig(format="%(message)s")
+    if debug:
+        log.setLevel(logging.DEBUG)
     if source and not (patch_ids or msgids):
         raise click.UsageError("--from needs --patch-id or --msgid")
     nmdb = os.path.expanduser(notmuch_database)
@@ -146,8 +154,8 @@ def main(
     try:
         open_store(syncdb, dry_run=dry_run)
         clients = {}
-        for project in sync.split(","):
-            name = project.split("=")[0]
+        for entry in project.split(","):
+            name = entry.split("=")[0]
             clients[name] = Client(Patchwork(api_url, name), token=patchwork_token, dry_run=dry_run)
             clients[name].project_data()
 
@@ -155,8 +163,8 @@ def main(
             if patch_ids or msgids:
                 patches = find_patches(clients, patch_ids, msgids)
                 with open_notmuch(nmdb, dry_run) as db, db.atomic():
-                    for project, patch in patches:
-                        sync_patch(clients[project], db, project, patch, dry_run, source)
+                    for name, patch in patches:
+                        sync_patch(clients[name], db, name, patch, dry_run, source)
             else:
                 for name, client in clients.items():
                     sync_project(client, nmdb, name, dry_run)
@@ -235,7 +243,7 @@ def sync_patch(client, db, project, patch, dry_run, source=None):
     try:
         msg = db.find(msgid)
     except LookupError:
-        click.echo(f"MESSAGE NOT FOUND: 'id:{msgid}' - skipping")
+        log.debug("MESSAGE NOT FOUND: 'id:%s' - skipping", msgid)
         return
 
     row = Patch.get_or_none(Patch.id == patch["id"])

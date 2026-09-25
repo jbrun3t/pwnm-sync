@@ -34,7 +34,8 @@ My ~/.pwnm-sync.ini config file looks like:
 ```
 [Defaults]
 patchwork_token=abcdef1234567890
-sync: skiboot,linuxppc-dev
+patchwork_url=https://patchwork.ozlabs.org
+project: skiboot,linuxppc-dev
 ```
 
 This means I take the defaults for other config options (see --help),
