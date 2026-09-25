@@ -21,7 +21,6 @@ import configparser
 import datetime
 import itertools
 import os
-import sqlite3
 import sys
 
 import notmuch2
@@ -29,22 +28,25 @@ import notmuch2
 from . import Error
 from .config import Patchwork
 from .patchwork import Client, PwError
+from .store import Patch, database, open_store
 
 API_VERSION = "1.3"
 # Patches handled while the notmuch database is held open for writing
 BATCH = 100
 
-all_my_tags = [
-    "accepted",
-    "superseded",
-    "changes-requested",
-    "rfc",
-    "rejected",
+# The states patchwork.kernel.org serves; a patch in another state gets no state tag
+STATES = [
     "new",
     "under-review",
-    "not-applicable",
-    "deferred",
+    "changes-requested",
     "awaiting-upstream",
+    "handled-elsewhere",
+    "not-applicable",
+    "superseded",
+    "accepted",
+    "rejected",
+    "deferred",
+    "rfc",
 ]
 
 
@@ -128,79 +130,41 @@ def sync():
         ),
         help="Only consider patches on or after this date",
     )
+    argp.add_argument(
+        "-n",
+        "--dry-run",
+        action="store_true",
+        help="Print what would change, without writing to patchwork, notmuch or the syncdb",
+    )
 
     args = argp.parse_args(remaining_argv)
 
-    pw_token = args.patchwork_token
     nmdb = os.path.expanduser(args.notmuch_database)
-    sync_db = args.syncdb
-
-    conn = sqlite3.connect(sync_db)
-
-    conn.execute("""CREATE TABLE IF NOT EXISTS pw_patch_status (
-    msgid text,
-    project text,
-    need_sync bool,
-    patchid int unique,
-    state text,
-    PRIMARY KEY(msgid,project))""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS nm_patch_status (
-    msgid text,
-    project text,
-    need_sync bool,
-    state text,
-    PRIMARY KEY(msgid,project))""")
-    conn.commit()
-
     api_url = f"{args.patchwork_url.rstrip('/')}/api/{API_VERSION}"
 
-    for project in args.sync.split(","):
-        project_name, project_list = project.split("=")
-        client = Client(Patchwork(api_url, project_name), token=pw_token)
-        project_id = client.project_data()["id"]
+    open_store(args.syncdb, dry_run=args.dry_run)
+    with database.atomic() as transaction:
+        for project in args.sync.split(","):
+            project_name, project_list = project.split("=")
+            client = Client(
+                Patchwork(api_url, project_name),
+                token=args.patchwork_token,
+                dry_run=args.dry_run,
+            )
+            project_id = client.project_data()["id"]
 
-        print(f"Looking at project {project_name} (id {project_id})")
-        with notmuch2.Database(nmdb) as db:
+            print(f"Looking at project {project_name} (id {project_id})")
             if args.epoch is None:
-                oldest_msg = get_oldest_nm_message(db, project_list)
+                with notmuch2.Database(nmdb) as db:
+                    oldest_msg = get_oldest_nm_message(db, project_list)
             else:
                 oldest_msg = args.epoch
 
             print(f"Going to look at things post {oldest_msg}")
-            populate_nm_patch_status(db, conn, project_name, all_my_tags)
+            sync_project(client, nmdb, project_name, oldest_msg, args.dry_run)
 
-        process_pw_patches(client, nmdb, conn, project_name, oldest_msg)
-
-        # We now know:
-        # 1) What changed locally (nm_patch_status.need_sync=1)
-        # 2) What changed remotely (pw_patch_status.need_sync=1)
-        # 3) What has update conflicts (union of 1 and 2)
-        # Current algorithm for conflicts is "take patchwork status"
-
-        # This syncs the DB for anything with a update conflict
-        #
-        # We've already applied the PW status in the loop above.
-        conn.execute("BEGIN")
-        conn.execute(
-            """UPDATE nm_patch_status
-        SET need_sync=0
-        WHERE
-        project=? AND
-        msgid in (SELECT msgid FROM pw_patch_status WHERE project=? and need_sync=1)""",
-            [project_name, project_name],
-        )
-        conn.commit()
-
-        # We're now left with need_sync=1 on nm_patch_status for only
-        # things we need to update in PW.
-        update_patchwork(client, conn, project_name)
-
-        # Things only updated in PW, ignore them (we've forced state sync above)
-        conn.execute(
-            "UPDATE pw_patch_status set need_sync=0 WHERE project=? and need_sync=1", [project_name]
-        )
-
-        conn.commit()
+        if args.dry_run:
+            transaction.rollback()
 
 
 def get_oldest_nm_message(db, project_list):
@@ -209,119 +173,76 @@ def get_oldest_nm_message(db, project_list):
     return datetime.datetime.fromtimestamp(next(msgs).date, datetime.UTC).replace(tzinfo=None)
 
 
-def insert_nm_patch_status(conn, message_id, project_name, tag):
-    conn.execute(
-        """INSERT OR REPLACE INTO nm_patch_status
-    (msgid, project, state, need_sync)
-    VALUES (?,?,?,COALESCE((SELECT 1 FROM nm_patch_status WHERE msgid=? and project=? and state IS NOT ?),
-                           (SELECT need_sync FROM nm_patch_status WHERE msgid=? and project=?),
-                           0)
-    )""",
-        (message_id, project_name, tag, message_id, project_name, tag, message_id, project_name),
-    )
-
-
-def populate_nm_patch_status(db, conn, project_name, all_my_tags):
-    for t in all_my_tags:
-        qstr = f"tag:pw-{project_name} and tag:pw-{project_name}-{t}"
-        for m in db.messages(qstr):
-            insert_nm_patch_status(conn, m.messageid, project_name, t)
-        conn.commit()
-
-
-def process_pw_patches(client, nmdb, conn, project_name, oldest_msg):
-    nr_patches_processed = 0
-    not_approved = {}
-    for batch in itertools.batched(client.patch_list(since=oldest_msg), BATCH):
+def sync_project(client, nmdb, project, since, dry_run):
+    """Sync the project's unarchived patches; the others leave the sync."""
+    mode = notmuch2.Database.MODE.READ_ONLY if dry_run else notmuch2.Database.MODE.READ_WRITE
+    listed = set()
+    for batch in itertools.batched(client.patch_list(since=since, archived=False), BATCH):
         # We open the DB for each batch as to not hold the notmuch
         # database open blocking other writers for too long.
-        with notmuch2.Database(nmdb, mode=notmuch2.Database.MODE.READ_WRITE) as db:
-            with db.atomic():
-                for patch in batch:
-                    nr_patches_processed = nr_patches_processed + 1
-                    msgid = patch["msgid"][1:-1]
-                    conn.execute(
-                        """INSERT OR REPLACE INTO pw_patch_status
-                    (msgid,project,patchid,state,need_sync)
-                    VALUES (?,?,?,?,
-                    COALESCE((SELECT 1 FROM pw_patch_status WHERE msgid=? and project=? and state IS NOT ?),
-                             (SELECT need_sync FROM pw_patch_status WHERE msgid=? and project=?),
-                             0)
-                    )""",
-                        (
-                            msgid,
-                            project_name,
-                            patch["id"],
-                            patch["state"],
-                            msgid,
-                            project_name,
-                            patch["state"],
-                            msgid,
-                            project_name,
-                        ),
-                    )
+        with notmuch2.Database(nmdb, mode=mode) as db, db.atomic():
+            for patch in batch:
+                listed.add(patch["id"])
+                sync_patch(client, db, project, patch, dry_run)
 
-                    try:
-                        msg = db.find(msgid)
-                    except LookupError:
-                        print(f"MESSAGE NOT FOUND: 'id:{msgid}' - skipping")
-                        # If we don't have the message, just continue.
-                        continue
+    for row in Patch.select().where(Patch.project == project):
+        if row.id not in listed:
+            print(f"patch {row.id}: leaves the sync")
+            row.delete_instance()
 
-                    # If we need to update PW, skip setting the tags in nm
-                    c = conn.cursor()
-                    c.execute(
-                        "SELECT state from nm_patch_status WHERE msgid=? AND project=? AND need_sync=1",
-                        [msgid, project_name],
-                    )
-                    curstate = c.fetchone()
-                    tag = patch["state"]
-                    if curstate:
-                        print(f"Going to sync {patch['msgid']} to patchwork for {project_name}")
-                        tag = curstate[0]
-
-                    msg.tags.add(f"pw-{project_name}")
-                    msg.tags.add("patchwork")
-                    for t in all_my_tags:
-                        msg.tags.discard(f"pw-{project_name}-{t}")
-
-                    if tag in all_my_tags:
-                        msg.tags.add(f"pw-{project_name}-{tag}")
-                    else:
-                        not_approved[tag] = not_approved.get(tag, 0) + 1
-                    insert_nm_patch_status(conn, msgid, project_name, tag)
-            conn.commit()
-
-        print(f"Processed {nr_patches_processed} {project_name} patches...")
-
-    print(f"Finished processing {nr_patches_processed} {project_name} patches!")
-    print(not_approved)
+    print(f"Finished processing {len(listed)} {project} patches!")
 
 
-def update_patchwork(client, conn, project_name):
-    cur = conn.cursor()
-    for row in cur.execute(
-        """
-    SELECT
-      pw_patch_status.patchid AS patchid,
-      nm_patch_status.state as state,
-      nm_patch_status.msgid as msgid
-    FROM nm_patch_status, pw_patch_status
-    WHERE pw_patch_status.msgid=nm_patch_status.msgid
-      AND pw_patch_status.project=nm_patch_status.project
-      AND nm_patch_status.project=? and nm_patch_status.need_sync=1""",
-        [project_name],
-    ):
-        print(f"Updating patch {row[0]} (id:{row[2]}) to {row[1]}")
-        try:
-            client.update(row[0], state=row[1])
-        except PwError as e:
-            print(f"ERROR {e} - are you maintainer of {project_name}?")
-            continue
-        conn.execute(
-            "UPDATE nm_patch_status SET need_sync=0 WHERE msgid=? AND project=?",
-            [row[2], project_name],
-        )
+def sync_patch(client, db, project, patch, dry_run):
+    """Carry over whichever side moved since the last run.
+
+    Patchwork wins when both did, or when the local state tags are ambiguous.
+    """
+    msgid = patch["msgid"][1:-1]
+    try:
+        msg = db.find(msgid)
+    except LookupError:
+        print(f"MESSAGE NOT FOUND: 'id:{msgid}' - skipping")
+        return
+
+    row = Patch.get_or_none(Patch.id == patch["id"])
+    state = patch["state"]
+    if row and state == row.state:
+        # Patchwork did not move: a state tag other than the agreed one is a local change
+        local = {s for s in STATES if f"pw-{project}-{s}" in msg.tags} - {row.state}
+        if len(local) > 1:
+            print(f"patch {patch['id']} <{msgid}>: tagged {sorted(local)} - taking patchwork's")
+        elif local:
+            state = local.pop()
+            print(f"patch {patch['id']} <{msgid}>: patchwork {row.state} -> {state}")
+            try:
+                client.update(patch["id"], state=state)
+            except PwError as e:
+                print(f"ERROR {e} - are you maintainer of {project}?")
+                return
+
+    retag(msg, project, state, dry_run)
+    Patch.replace(id=patch["id"], project=project, state=state).execute()
+
+
+def retag(msg, project, state, dry_run):
+    tags = set(msg.tags)
+    want = {"patchwork", f"pw-{project}"}
+    if state in STATES:
+        want.add(f"pw-{project}-{state}")
+    add = want - tags
+    remove = ({f"pw-{project}-{s}" for s in STATES} - want) & tags
+    if not add and not remove:
+        return
+
+    changes = [f"+{t}" for t in sorted(add)] + [f"-{t}" for t in sorted(remove)]
+    print(f"<{msg.messageid}>: notmuch {' '.join(changes)}")
+    if dry_run:
+        return
+    for t in add:
+        msg.tags.add(t)
+    for t in remove:
+        msg.tags.discard(t)
 
 
 def main():

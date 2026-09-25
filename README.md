@@ -39,7 +39,9 @@ sync: skiboot=skiboot@lists.ozlabs.org,linuxppc-dev=linuxppc-dev@lists.ozlabs.or
 
 This means I take the defaults for other config options (see --help),
 such as where my notmuch database lives and the path to the sqlite3
-database that helps maintain state for pwnm-sync.
+database that helps maintain state for pwnm-sync. If pwnm-sync refuses
+that database as written by another version, delete it: the next run
+rebuilds it, taking the patchwork state of every patch.
 
 Each mail message (i.e. patch) that's in patchwork gets a `patchwork` tag.
 Additionally, they will get extra tags based on the state of the patch in
@@ -74,12 +76,20 @@ If I am a maintainer on the skiboot project and I change which of the
 'pw-skiboot-{state}' tags a message is tagged with, the next time
 pwnm-sync is run, it'll update patchwork with the new status.
 
-If you're not a maintainer and you change the state of a patch... something
-will fail.
+If the state changed on both sides since the last run, patchwork wins.
 
-If you break the rules like putting multiple pw-{project}-{state} tags
-for the same project, then err... something probably not great will happen.
-PATCHES WELCOME.
+If you're not a maintainer and you change the state of a patch, patchwork
+refuses the update: pwnm-sync reports it and tries again on the next run.
+
+Adding a new pw-{project}-{state} tag without removing the old one
+counts as a state change. When the state tags are ambiguous (two new
+states), the patchwork state is applied back.
+
+Only patches that are not archived in patchwork are synced. Once a patch
+is archived it leaves the sync and its tags stay as they were last set.
+
+Run with `--dry-run` to see what would change without writing to
+patchwork, notmuch or the sync database.
 
 LICENSE
 =======
