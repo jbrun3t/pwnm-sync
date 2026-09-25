@@ -68,12 +68,18 @@ class Client:
             return value.isoformat()
         return value
 
+    @staticmethod
+    def _reason(e: requests.RequestException) -> str:
+        """The error, naming the url, then patchwork's explanation when it answered with one."""
+        body = e.response.text.strip()[:300] if e.response is not None else ""
+        return f"{e}: {body}" if body else str(e)
+
     def _get(self, url: str) -> requests.Response:
         try:
             response = self._session.get(url, timeout=DEFAULT_TIMEOUT)
             response.raise_for_status()
         except requests.RequestException as e:
-            raise PwError(f"{url}: {e}") from e
+            raise PwError(self._reason(e)) from e
         return response
 
     def _list(self, path: str, **params: object) -> Iterator[dict]:
@@ -142,4 +148,4 @@ class Client:
             response = self._session.patch(url, json=body, timeout=DEFAULT_TIMEOUT)
             response.raise_for_status()
         except requests.RequestException as e:
-            raise PwError(f"{url}: cannot update {body}: {e}") from e
+            raise PwError(f"cannot update {body}: {self._reason(e)}") from e
