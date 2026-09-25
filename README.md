@@ -52,7 +52,7 @@ tag is put back.
 
 Archived patches stay synced while their message is in notmuch; patchwork is
 only asked about them once their tags change. Patches without a message in
-notmuch are skipped (`--debug` lists them).
+notmuch are skipped.
 
 `--dry-run` prints the changes and writes nothing. `--patch-id` and `--msgid`
 sync only those patches; `--from patchwork|notmuch` forces the direction.

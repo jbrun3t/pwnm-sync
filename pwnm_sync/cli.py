@@ -18,7 +18,6 @@
 
 import configparser
 import itertools
-import logging
 import os
 
 import click
@@ -28,8 +27,6 @@ from . import Error
 from .config import Patchwork
 from .patchwork import Client, PwError
 from .store import Patch, database, open_store
-
-log = logging.getLogger(__name__)
 
 API_VERSION = "1.3"
 # Patches handled while the notmuch database is held open for writing
@@ -135,7 +132,6 @@ def load_config(ctx, param, path):
     type=click.DateTime(formats=["%Y-%m-%d"]),
     help="List the patches since this date, archived or not, rather than every unarchived one.",
 )
-@click.option("--debug", is_flag=True, help="Also report patches whose message notmuch lacks.")
 def main(
     notmuch_database,
     syncdb,
@@ -147,12 +143,8 @@ def main(
     msgids,
     source,
     epoch,
-    debug,
 ):
     """Sync patch state between Patchwork and Notmuch."""
-    logging.basicConfig(format="%(message)s")
-    if debug:
-        log.setLevel(logging.DEBUG)
     if source and not (patch_ids or msgids):
         raise click.UsageError("--from needs --patch-id or --msgid")
     if epoch and (patch_ids or msgids):
@@ -276,7 +268,6 @@ def sync_patch(client, db, project, patch, dry_run, source=None):
     try:
         msg = db.find(msgid)
     except LookupError:
-        log.debug("MESSAGE NOT FOUND: 'id:%s' - skipping", msgid)
         Patch.delete_by_id(patch["id"])
         return
 
