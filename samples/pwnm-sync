@@ -5,7 +5,7 @@
 
 [Defaults]
 # Patchwork projects to sync, comma separated. Required, here or with -p.
-project = linux-clk
+project = linux-foo
 
 # Needed to write to patchwork; get it from /user/ on the instance.
 # PWNM_SYNC_TOKEN in the environment overrides it.
@@ -29,6 +29,6 @@ project = linux-clk
 # Optional: our tag names on the left, the ones to use instead on the right.
 # Only the alias is synced; a tag left under its old name is yours.
 #[Aliases]
-#pw-linux-clk = clk
-#pw-linux-clk-accepted = clk/applied
-#pw-linux-clk-delegate-jbrunet = clk/mine
+#pw-linux-foo = foo
+#pw-linux-foo-accepted = foo/applied
+#pw-linux-foo-delegate-jdoe = foo/mine
