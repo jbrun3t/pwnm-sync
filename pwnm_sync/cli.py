@@ -1,5 +1,3 @@
-#!/usr/bin/python3
-#
 # pwnm-sync - Sync patch state between Patchwork and Notmuch
 # Copyright (C) 2018 Stewart Smith, IBM Corp.
 #
@@ -33,7 +31,7 @@ all_my_tags = ['accepted', 'superseded', 'changes-requested', 'rfc',
                'awaiting-upstream']
 
 
-def main():
+def sync():
     initial_argp = argparse.ArgumentParser(add_help=False)
     initial_argp.add_argument("-c", "--config", dest='config_file', type=str,
                             help="Configuration file for pwnm-sync",
@@ -303,11 +301,9 @@ def update_patchwork(session, conn, patchwork_url, project_name):
             print(f"ERROR State didn't update for {row[0]} - are you maintainer of {project_name}?")
 
 
-if __name__ == '__main__':
+def main():
     try:
-        main()
+        sync()
     except Exception as e:
         print("Error", e)
         sys.exit(1)
-
-    sys.exit(0)

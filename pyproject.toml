@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pwnm-sync"
+version = "0.1.0"
+description = "Sync patch state between Patchwork and Notmuch"
+readme = "README.md"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+dependencies = [
+    "notmuch2",
+    "requests-futures",
+]
+
+[project.scripts]
+pwnm-sync = "pwnm_sync.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["pwnm_sync"]

@@ -24,11 +24,11 @@ You will need:
  - The notmuch development headers (`libnotmuch-dev` on Debian): the
    `notmuch2` Python bindings are compiled against them at install time
 
-Install the dependencies in a virtual environment:
+Install it in a virtual environment:
 ```
 python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-.venv/bin/python pwnm-sync.py --help
+.venv/bin/pip install -e .
+.venv/bin/pwnm-sync --help
 ```
 
 My ~/.pwnm-sync.ini config file looks like:
