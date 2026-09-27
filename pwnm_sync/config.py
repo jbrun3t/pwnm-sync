@@ -2,6 +2,7 @@
 
 import configparser
 import os
+import subprocess
 from dataclasses import dataclass
 from typing import NamedTuple
 
@@ -9,7 +10,7 @@ import click
 import platformdirs
 from click.core import ParameterSource
 
-from . import NAME
+from . import NAME, Error
 
 CONFIG_FILE = platformdirs.user_config_dir(NAME)
 SYNCDB = os.path.join(platformdirs.user_state_dir(NAME), f"{NAME}.db")
@@ -68,3 +69,16 @@ def load_defaults(ctx, param, path):
     for section in ("Prefixes", "Aliases"):
         if config.has_section(section):
             ctx.meta[section.lower()] = dict(config.items(section))
+
+
+def token_from(command):
+    """The first line a shell command prints, as password managers print a secret."""
+    try:
+        run = subprocess.run(command, shell=True, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as e:
+        stderr = e.stderr.strip()
+        raise Error(f"{command}: exited {e.returncode}" + (f": {stderr}" if stderr else "")) from e
+    token = next(iter(run.stdout.splitlines()), "").strip()
+    if not token:
+        raise Error(f"{command}: printed no token")
+    return token

@@ -24,7 +24,16 @@ import click
 import notmuch2
 
 from . import Error
-from .config import BATCH, CONFIG_FILE, STATES, SYNCDB, Config, Patchwork, load_defaults
+from .config import (
+    BATCH,
+    CONFIG_FILE,
+    STATES,
+    SYNCDB,
+    Config,
+    Patchwork,
+    load_defaults,
+    token_from,
+)
 from .patchwork import Client, PwError
 from .store import Patch, database, open_store
 
@@ -60,6 +69,14 @@ DELEGATE = "delegate-"
     envvar="PWNM_SYNC_TOKEN",
     show_envvar=True,
     help="Your Patchwork API token. Get it from /user/ on your patchwork instance.",
+)
+@click.option(
+    "--with-token-cmd",
+    "token_command",
+    is_flag=False,
+    flag_value="",
+    help="Take the token from the first line this shell command prints, "
+    "patchwork_token_command in the configuration file when no command is given.",
 )
 @click.option(
     "-u",
@@ -116,6 +133,7 @@ def main(
     notmuch_database,
     syncdb,
     patchwork_token,
+    token_command,
     patchwork_url,
     project,
     batch,
@@ -131,8 +149,14 @@ def main(
     if epoch and (patch_ids or msgids):
         raise click.UsageError("--epoch does not apply to --patch-id or --msgid")
     api_url = f"{patchwork_url.rstrip('/')}/api/{API_VERSION}"
-    # Only the configuration file sets the states, the prefixes and the aliases
+    # Settings only the configuration file gives
     states = (ctx.default_map or {}).get("states")
+    if token_command == "":
+        token_command = (ctx.default_map or {}).get("patchwork_token_command")
+        if not token_command:
+            raise click.UsageError(
+                "--with-token-cmd without a command needs patchwork_token_command"
+            )
     aliases = ctx.meta.get("aliases", {})
     if len(set(aliases.values())) != len(aliases):
         raise click.UsageError("[Aliases] gives the same tag to several of ours")
@@ -148,6 +172,8 @@ def main(
     )
 
     try:
+        if token_command:
+            patchwork_token = token_from(token_command)
         open_store(os.path.expanduser(syncdb), dry_run=dry_run)
         clients = {}
         for name in filter(None, (p.strip() for p in project.split(","))):

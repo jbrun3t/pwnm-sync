@@ -11,6 +11,10 @@ project = linux-foo
 # PWNM_SYNC_TOKEN in the environment overrides it.
 #patchwork_token = abcdef1234567890
 
+# Run by --with-token-cmd alone, which takes the token from the first line it
+# prints instead.
+#patchwork_token_command = pass show patchwork.kernel.org
+
 #patchwork_url = https://patchwork.kernel.org
 
 # The notmuch database; the one notmuch is configured with when unset.
