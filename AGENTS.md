@@ -21,9 +21,9 @@ Run both before calling anything done, and have them clean:
 
 ## Patchwork
 
-Do not hammer patchwork with requests. A full run lists every unarchived patch
-of each synced project; when trying things, sync only a few patches with
-`--patch-id` or `--msgid`.
+Do not hammer patchwork with requests. The first run of a project lists a year
+of its patches; when trying things, give `--epoch` a recent date on a fresh
+sync database, or sync only a few patches with `--patch-id` or `--msgid`.
 
 ## Notmuch
 

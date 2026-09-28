@@ -22,7 +22,8 @@ project = linux-foo
 
 #syncdb = ~/.local/state/pwnm-sync/pwnm-sync.db
 
-# Patches handled while the notmuch database is held open for writing.
+# Patches handled while the notmuch database is held open for writing, and
+# events read per request (patchwork serves at most 250).
 #batch = 250
 
 # Patch states that get a tag, comma separated; only settable here.

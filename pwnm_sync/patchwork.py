@@ -7,6 +7,7 @@ See https://patchwork.readthedocs.io/en/stable/api/rest/
 from __future__ import annotations
 
 import datetime
+import itertools
 from collections.abc import Iterator
 from urllib.parse import urlencode
 
@@ -42,6 +43,8 @@ class Client:
         self._dry_run = dry_run
         self._config = config
         self._list_params = {"per_page": DEFAULT_PER_PAGE}
+        # Patchwork user ids by username, None for no such user
+        self._user_ids: dict[str, int | None] = {}
 
         self._session = requests.Session()
         self._session.headers["User-Agent"] = USER_AGENT
@@ -91,8 +94,39 @@ class Client:
             yield from self._decode(response, url)
             url = response.links.get("next", {}).get("url", "")
 
+    @staticmethod
+    def _after(entries: Iterator[dict], cursor: int) -> tuple[list[dict], int]:
+        """The entries listed newest first down to id `cursor`, oldest first, and the newest id.
+
+        An entry listed twice, as new ones push the pages down, is taken once.
+        """
+        found = {e["id"]: e for e in itertools.takewhile(lambda e: e["id"] > cursor, entries)}
+        return list(reversed(found.values())), max(found, default=cursor)
+
+    @property
+    def project(self) -> str:
+        return self._config.project
+
     def patch_list(self, **params: object) -> Iterator[dict]:
         return self._list("patches", project=self._config.project, **params)
+
+    def event_list(self, **params: object) -> Iterator[dict]:
+        """Yield the project's events, newest first."""
+        return self._list("events", project=self._config.project, **params)
+
+    def newest_patch_id(self) -> int:
+        return next((p["id"] for p in self.patch_list(order="-id", per_page=1)), 0)
+
+    def newest_event_id(self) -> int:
+        return next((e["id"] for e in self.event_list(per_page=1)), 0)
+
+    def patches_after(self, patch_id: int) -> tuple[list[dict], int]:
+        """The patches after `patch_id`, oldest first, and the newest id."""
+        return self._after(self.patch_list(order="-id"), patch_id)
+
+    def events_after(self, event_id: int, **params: object) -> tuple[list[dict], int]:
+        """The events after `event_id`, oldest first, and the newest id."""
+        return self._after(self.event_list(**params), event_id)
 
     def _document(self, path: str) -> dict:
         """Fetch one document, refusing one that belongs to another project."""
@@ -112,32 +146,31 @@ class Client:
     def patch_data(self, patch_id: int) -> dict:
         return self._document(f"patches/{patch_id}")
 
-    def user_id(self, username: str) -> int | None:
+    def user_id(self, username: str) -> int:
         """The id of the user with this username; listing users needs a token."""
-        for user in self._list("users", q=username):
-            if user["username"] == username:
-                return user["id"]
-        return None
+        if username not in self._user_ids:
+            users = self._list("users", q=username)
+            self._user_ids[username] = next(
+                (user["id"] for user in users if user["username"] == username), None
+            )
+        if self._user_ids[username] is None:
+            raise PwError(f"no patchwork user {username}")
+        return self._user_ids[username]
 
     def update(
         self,
         patch_id: int,
         *,
         state: str | None = None,
-        archived: bool | None = None,
-        delegate: int | object | None = KEEP,
+        delegate: str | object | None = KEEP,
     ) -> None:
         """Write the settings given on a patch, skipping whatever is None. A dry run writes nothing.
 
-        `delegate` is a user id, or None to clear it.
+        `delegate` is a username, or None to clear it.
         """
-        body = {
-            key: value
-            for key, value in (("state", state), ("archived", archived))
-            if value is not None
-        }
+        body = {"state": state} if state is not None else {}
         if delegate is not KEEP:
-            body["delegate"] = delegate
+            body["delegate"] = self.user_id(delegate) if delegate else None
         if not body:
             return
         if self._dry_run:

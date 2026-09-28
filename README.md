@@ -40,7 +40,6 @@ by default. The sync database defaults to
 |---|---|
 | `patchwork`, `pw-{project}` | the message is a patch in the project |
 | `pw-{project}-{state}` | its state, if among the configured `states` |
-| `pw-{project}-archived` | archived |
 | `pw-{project}-delegate-{user}` | delegated to that maintainer |
 
 In the configuration file, an optional `[Prefixes]` section names a project's
@@ -60,9 +59,12 @@ Only the new names are synced then; tags left under their old names are yours.
 
 ## Sync
 
-Each run lists the unarchived patches of each project. For each field (state,
-archived, delegate), the sync database keeps the value both sides last agreed
-on:
+The first run of a project lists its patches from the last year, archived or
+not. Later runs read what patchwork logged since: the state and delegate
+changes, and the new patches. Archiving is not logged, so it is not synced.
+
+For each field (state, delegate), the sync database keeps the value both sides
+last agreed on:
 
 - changed in patchwork: the tags follow
 - changed in notmuch: patchwork is updated
@@ -71,17 +73,18 @@ on:
 Adding a tag without removing the old one counts as a change. A removed state
 tag is put back.
 
-Archived patches stay synced while their message is in notmuch; patchwork is
-only asked about them once their tags change. Patches without a message in
-notmuch are skipped.
+A patch whose message is not in notmuch yet is tagged once it arrives. A change
+in patchwork to a patch older than the first listing syncs it too, if its
+message is in notmuch.
 
 `--dry-run` prints the changes and writes nothing. `--patch-id` and `--msgid`
 sync only those patches; `--from patchwork|notmuch` forces the direction.
-`--epoch DATE` lists the patches since DATE, archived or not, to tag an older
-notmuch database.
+`--epoch DATE` lists the patches since DATE: on the first run instead of the
+last year, afterwards to add older ones.
 
-If the sync database was written by another version, delete it: the next run
-rebuilds it, taking patchwork's values.
+The sync database keeps every patch it has seen. To start over, or when it was
+written by another version, delete it: the next run rebuilds it, taking
+patchwork's values.
 
 ## License
 

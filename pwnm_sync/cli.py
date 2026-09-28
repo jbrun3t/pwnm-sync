@@ -17,29 +17,17 @@
 #
 # SPDX-License-Identifier:  GPL-3.0-or-later
 
-import itertools
 import os
 
 import click
-import notmuch2
 
 from . import Error
-from .config import (
-    BATCH,
-    CONFIG_FILE,
-    STATES,
-    SYNCDB,
-    Config,
-    Patchwork,
-    load_defaults,
-    token_from,
-)
+from .config import BATCH, CONFIG_FILE, SYNCDB, Config, Patchwork, load_defaults, token_from
 from .patchwork import Client, PwError
-from .store import Patch, database, open_store
+from .store import database, open_store
+from .sync import ProjectSync, open_notmuch
 
 API_VERSION = "1.3"
-ARCHIVED = "archived"
-DELEGATE = "delegate-"
 
 
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
@@ -94,7 +82,8 @@ DELEGATE = "delegate-"
     "--batch",
     type=click.IntRange(min=1),
     default=BATCH,
-    help="Patches handled while the notmuch database is held open for writing.",
+    help="Patches handled while the notmuch database is held open for writing, "
+    "and events read per request (patchwork serves at most 250).",
 )
 @click.option(
     "-n",
@@ -125,7 +114,8 @@ DELEGATE = "delegate-"
     "-e",
     "--epoch",
     type=click.DateTime(formats=["%Y-%m-%d"]),
-    help="List the patches since this date, archived or not, rather than every unarchived one.",
+    help="List the patches since this date: on the first run instead of the last year, "
+    "on later ones on top of the new patches.",
 )
 @click.pass_context
 def main(
@@ -149,48 +139,27 @@ def main(
     if epoch and (patch_ids or msgids):
         raise click.UsageError("--epoch does not apply to --patch-id or --msgid")
     api_url = f"{patchwork_url.rstrip('/')}/api/{API_VERSION}"
-    # Settings only the configuration file gives
-    states = (ctx.default_map or {}).get("states")
-    if token_command == "":
-        token_command = (ctx.default_map or {}).get("patchwork_token_command")
-        if not token_command:
-            raise click.UsageError(
-                "--with-token-cmd without a command needs patchwork_token_command"
-            )
-    aliases = ctx.meta.get("aliases", {})
-    if len(set(aliases.values())) != len(aliases):
-        raise click.UsageError("[Aliases] gives the same tag to several of ours")
-    sync = Sync(
-        Config(
-            notmuch=os.path.expanduser(notmuch_database) if notmuch_database else None,
-            states=[s.strip() for s in states.split(",") if s.strip()] if states else STATES,
-            batch=batch,
-            dry_run=dry_run,
-            prefixes=ctx.meta.get("prefixes", {}),
-            aliases=aliases,
-        )
-    )
+    config = Config.from_context(ctx, notmuch=notmuch_database, batch=batch, dry_run=dry_run)
 
     try:
-        if token_command:
-            patchwork_token = token_from(token_command)
+        if token_command is not None:
+            patchwork_token = token_from(ctx, token_command)
         open_store(os.path.expanduser(syncdb), dry_run=dry_run)
-        clients = {}
-        for name in filter(None, (p.strip() for p in project.split(","))):
-            clients[name] = Client(Patchwork(api_url, name), token=patchwork_token, dry_run=dry_run)
-            # Their ids there are profile ids, not the user ids a delegate takes
-            maintainers = clients[name].project_data()["maintainers"]
-            sync.maintainers[name] = {user["username"] for user in maintainers}
+        clients = {
+            name: Client(Patchwork(api_url, name), token=patchwork_token, dry_run=dry_run)
+            for name in filter(None, (p.strip() for p in project.split(",")))
+        }
+        syncs = {name: ProjectSync(config, client) for name, client in clients.items()}
 
         with database.atomic() as transaction:
             if patch_ids or msgids:
                 patches = find_patches(clients, patch_ids, msgids)
-                with sync.open_notmuch() as db, db.atomic():
+                with open_notmuch(config) as db, db.atomic():
                     for name, patch in patches:
-                        sync.sync_patch(clients[name], db, name, patch, source)
+                        syncs[name].sync_fetched(db, patch, source)
             else:
-                for name, client in clients.items():
-                    sync.sync_project(client, name, epoch and epoch.astimezone())
+                for sync in syncs.values():
+                    sync.run(epoch and epoch.astimezone())
 
             if dry_run:
                 transaction.rollback()
@@ -222,207 +191,3 @@ def find_patches(clients, patch_ids, msgids):
             raise Error(f"<{msgid}>: no patch in {', '.join(clients)}")
         found += patches
     return found
-
-
-def patchwork_values(patch):
-    delegate = patch["delegate"]["username"] if patch["delegate"] else None
-    return {"state": patch["state"], "archived": patch["archived"], "delegate": delegate}
-
-
-def stored_values(row):
-    return {"state": row.state, "archived": row.archived, "delegate": row.delegate}
-
-
-class Sync:
-    """Syncs patches between patchwork and notmuch as the configuration says."""
-
-    def __init__(self, config):
-        self.config = config
-        # Per project, the usernames patchwork may delegate to
-        self.maintainers = {}
-        # Patchwork user ids by username, looked up once per run
-        self.user_ids = {}
-        self.canonical = {alias: tag for tag, alias in config.aliases.items()}
-
-    def tags_of(self, msg):
-        """The message's tags under our names; our name for a tag with an alias is a user tag."""
-        return {
-            self.canonical.get(t, t)
-            for t in msg.tags
-            if t in self.canonical or t not in self.config.aliases
-        }
-
-    def prefix(self, project):
-        """The tag telling a message is a patch of the project, which names its other tags."""
-        return self.config.prefixes.get(project, f"pw-{project}")
-
-    def open_notmuch(self):
-        modes = notmuch2.Database.MODE
-        mode = modes.READ_ONLY if self.config.dry_run else modes.READ_WRITE
-        return notmuch2.Database(self.config.notmuch, mode=mode)
-
-    def sync_project(self, client, project, epoch=None):
-        """Sync the project's unarchived patches, or all since `epoch`, then the stored ones not listed."""
-        click.echo(f"Looking at project {project}")
-        listed = set()
-        patches = client.patch_list(since=epoch) if epoch else client.patch_list(archived=False)
-        for batch in itertools.batched(patches, self.config.batch):
-            # We open the DB for each batch as to not hold the notmuch
-            # database open blocking other writers for too long.
-            with self.open_notmuch() as db, db.atomic():
-                for patch in batch:
-                    listed.add(patch["id"])
-                    self.sync_patch(client, db, project, patch)
-
-        unlisted = [
-            row for row in Patch.select().where(Patch.project == project) if row.id not in listed
-        ]
-        if unlisted:
-            with self.open_notmuch() as db, db.atomic():
-                for row in unlisted:
-                    self.sync_unlisted(client, db, project, row, archived=not epoch)
-
-        click.echo(f"Finished processing {len(listed)} {project} patches!")
-
-    def sync_unlisted(self, client, db, project, row, archived=True):
-        """Sync a stored patch missing from the listing.
-
-        Missing means archived in patchwork when `archived` is true; a listing by date also
-        misses older patches. Its values are known without asking patchwork until the tags
-        move away from them.
-        """
-        try:
-            msg = db.find(row.msgid)
-        except LookupError:
-            row.delete_instance()
-            return
-
-        stored = stored_values(row)
-        expected = self.owned_tags(project, self.project_tags(project, stored))
-        if self.owned_tags(project, self.tags_of(msg)) != expected:
-            try:
-                patch = client.patch_data(row.id)
-            except PwError as e:
-                click.echo(f"patch {row.id} <{row.msgid}>: {e}")
-                return
-            self.sync_patch(client, db, project, patch)
-        elif archived and not row.archived:
-            self.change_tags(msg, self.project_tags(project, stored | {"archived": True}), set())
-            row.archived = True
-            row.save()
-
-    def sync_patch(self, client, db, project, patch, source=None):
-        """Carry over whichever side moved since the last run, or the `source` side when given.
-
-        Each field is reconciled on its own. Patchwork wins when both sides moved, when the
-        patch was never synced, or when the tags give several new values.
-        """
-        msgid = patch["msgid"][1:-1]
-        try:
-            msg = db.find(msgid)
-        except LookupError:
-            Patch.delete_by_id(patch["id"])
-            return
-
-        row = Patch.get_or_none(Patch.id == patch["id"])
-        stored = stored_values(row) if row else None
-        remote = patchwork_values(patch)
-        local = self.tagged_values(project, self.tags_of(msg))
-        keep, push, ambiguous = {}, {}, {}
-        for field, pw in remote.items():
-            if source == "notmuch":
-                base = pw  # any other value the tags hold is pushed
-            elif source == "patchwork" or stored is None:
-                keep[field] = pw
-                continue
-            else:
-                base = stored[field]
-            moved = local[field] - {base}
-            if pw != base or not moved:
-                keep[field] = pw
-            elif len(moved) == 1:
-                keep[field] = push[field] = moved.pop()
-            else:
-                keep[field] = pw
-                ambiguous[field] = moved
-
-        label = f"patch {patch['id']} <{msgid}>"
-        for field, values in ambiguous.items():
-            click.echo(f"{label}: {field} tagged {sorted(values, key=str)} - taking patchwork's")
-        if ambiguous and source == "notmuch":
-            return
-        if push:
-            changes = ", ".join(
-                f"{field} {remote[field]} -> {value}" for field, value in push.items()
-            )
-            click.echo(f"{label}: patchwork {changes}")
-            if push.get("delegate") and push["delegate"] not in self.maintainers[project]:
-                click.echo(f"ERROR {push['delegate']} is not a maintainer of {project}")
-                return
-            try:
-                update = dict(push)
-                if name := push.get("delegate"):
-                    if name not in self.user_ids:
-                        self.user_ids[name] = client.user_id(name)
-                    if self.user_ids[name] is None:
-                        raise PwError(f"no patchwork user {name}")
-                    update["delegate"] = self.user_ids[name]
-                client.update(patch["id"], **update)
-            except PwError as e:
-                click.echo(f"ERROR {e}")
-                return
-
-        want = self.project_tags(project, keep)
-        self.change_tags(msg, want, self.owned_tags(project, self.tags_of(msg)) - want)
-        Patch.replace(id=patch["id"], project=project, msgid=msgid, **keep).execute()
-
-    def tagged_values(self, project, tags):
-        """The values the message's tags give each field.
-
-        No archived tag means not archived, and no delegate tag no delegate.
-        """
-        prefix = self.prefix(project) + "-"
-        delegates = {
-            t.removeprefix(prefix + DELEGATE) for t in tags if t.startswith(prefix + DELEGATE)
-        }
-        return {
-            "state": {s for s in self.config.states if prefix + s in tags},
-            "archived": {prefix + ARCHIVED in tags},
-            "delegate": delegates or {None},
-        }
-
-    def project_tags(self, project, values):
-        """The tags a message carries for a patch of the project with these values."""
-        prefix = self.prefix(project) + "-"
-        tags = {"patchwork", self.prefix(project)}
-        if values["state"] in self.config.states:
-            tags.add(prefix + values["state"])
-        if values["archived"]:
-            tags.add(prefix + ARCHIVED)
-        if values["delegate"]:
-            tags.add(prefix + DELEGATE + values["delegate"])
-        return tags
-
-    def owned_tags(self, project, tags):
-        """The tags among `tags` that carry a field of the project's patches."""
-        prefix = self.prefix(project) + "-"
-        fixed = {prefix + v for v in [*self.config.states, ARCHIVED]}
-        return {t for t in tags if t in fixed or t.startswith(prefix + DELEGATE)}
-
-    def change_tags(self, msg, add, remove):
-        """Add and remove tags given under our names, writing the user's aliases."""
-        tags = self.tags_of(msg)
-        alias = self.config.aliases
-        add = {alias.get(t, t) for t in add - tags}
-        remove = {alias.get(t, t) for t in remove & tags}
-        if not add and not remove:
-            return
-
-        changes = [f"+{t}" for t in sorted(add)] + [f"-{t}" for t in sorted(remove)]
-        click.echo(f"<{msg.messageid}>: notmuch {' '.join(changes)}")
-        if self.config.dry_run:
-            return
-        for t in add:
-            msg.tags.add(t)
-        for t in remove:
-            msg.tags.discard(t)
