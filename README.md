@@ -92,4 +92,4 @@ patchwork's values, and lists the patches of the last year again, or since
 
 ## License
 
-GPLv3+, see `LICENSE`. `pwnm_sync/patchwork.py` is MIT.
+GPLv3+, see `LICENSE`.

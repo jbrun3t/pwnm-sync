@@ -25,10 +25,10 @@ import itertools
 import click
 import notmuch2
 import peewee
+from pwlite import Client, PwError
 
-from . import Error
+from . import NAME, VERSION, Error
 from .config import BATCH, CONFIG_FILE, SYNCDB, WINDOW, Config, load_defaults, token_from
-from .patchwork import Client, PwError
 from .store import Patch, Project, User, open_store, transaction
 from .tags import Tags
 
@@ -411,7 +411,14 @@ def main(
         open_store(syncdb, dry_run=dry_run)
         syncs = {
             name: ProjectSync(
-                config, Client(patchwork_url, name, token=patchwork_token, dry_run=dry_run)
+                config,
+                Client(
+                    patchwork_url,
+                    name,
+                    token=patchwork_token,
+                    user_agent=f"{NAME}/{VERSION}",
+                    dry_run=dry_run,
+                ),
             )
             for name in project
         }
@@ -431,5 +438,5 @@ def main(
             else:
                 for sync in syncs.values():
                     sync.run(epoch and epoch.astimezone())
-    except Error as e:
+    except (Error, PwError) as e:
         raise click.ClickException(str(e)) from e

@@ -15,7 +15,7 @@ dependencies = [
     "notmuch2",
     "peewee",
     "platformdirs",
-    "requests",
+    "pwlite @ git+https://github.com/jbrun3t/pwlite.git@v0.1.0",
 ]
 
 [project.optional-dependencies]
@@ -23,6 +23,9 @@ dev = ["ruff~=0.16.0"]
 
 [project.scripts]
 pwnm-sync = "pwnm_sync.cli:main"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["pwnm_sync"]
