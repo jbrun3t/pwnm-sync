@@ -21,7 +21,6 @@
 
 import datetime
 import itertools
-import os
 
 import click
 import notmuch2
@@ -30,7 +29,7 @@ import peewee
 from . import Error
 from .config import BATCH, CONFIG_FILE, SYNCDB, WINDOW, Config, load_defaults, token_from
 from .patchwork import Client, PwError
-from .store import Patch, Project, User, database, open_store
+from .store import Patch, Project, User, open_store, transaction
 from .tags import Tags
 
 # The events synced, and the field they change
@@ -304,7 +303,7 @@ def find_patches(syncs, patch_ids, msgids):
     is_eager=True,
     expose_value=False,
     callback=load_defaults,
-    help="Configuration file for pwnm-sync",
+    help="Configuration file for pwnm-sync.",
 )
 @click.option(
     "-m",
@@ -356,7 +355,7 @@ def find_patches(syncs, patch_ids, msgids):
     "-n",
     "--dry-run",
     is_flag=True,
-    help="Print what would change, without writing to patchwork, notmuch or the syncdb",
+    help="Print what would change, without writing to patchwork, notmuch or the syncdb.",
 )
 @click.option(
     "--patch-id",
@@ -410,7 +409,7 @@ def main(
     try:
         if token_command is not None:
             patchwork_token = token_from(ctx, token_command)
-        open_store(os.path.expanduser(syncdb), dry_run=dry_run)
+        open_store(syncdb, dry_run=dry_run)
         syncs = {
             name: ProjectSync(
                 config, Client(patchwork_url, name, token=patchwork_token, dry_run=dry_run)
@@ -418,7 +417,7 @@ def main(
             for name in project
         }
 
-        with database.atomic() as transaction:
+        with transaction(dry_run):
             if patch_ids or msgids:
                 patches = find_patches(syncs, patch_ids, msgids)
                 with open_notmuch(config) as db, db.atomic():
@@ -427,8 +426,5 @@ def main(
             else:
                 for sync in syncs.values():
                     sync.run(epoch and epoch.astimezone())
-
-            if dry_run:
-                transaction.rollback()
     except Error as e:
         raise click.ClickException(str(e)) from e
