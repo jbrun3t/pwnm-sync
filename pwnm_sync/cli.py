@@ -142,13 +142,12 @@ class ProjectSync:
         """
         click.echo(f"Looking at project {self.project}")
         cursors = Project.get_or_none(Project.name == self.project)
-        first = cursors is None
-        if first:
+        if cursors is None:
             self.client.project()  # a misspelt project would list nothing, silently
             # Read before the patches, so the next run replays what moves meanwhile
             event = newest_id(self.client.events(per_page=1))
             patch = newest_id(self.client.patches(order="-id", per_page=1))
-            cursors = Project(name=self.project, patch=patch, event=event)
+            cursors = Project.create(name=self.project, patch=patch, event=event)
             since = epoch or datetime.datetime.now(datetime.UTC) - WINDOW
             listed = list(self.client.patches(since=since))
             events = []
@@ -180,7 +179,7 @@ class ProjectSync:
         if unknown:
             self.adopt(unknown)
 
-        cursors.save(force_insert=first)
+        cursors.save()
         click.echo(f"Finished processing {len(remote)} {self.project} patches!")
 
     def adopt(self, unknown):
@@ -419,6 +418,12 @@ def main(
 
         with transaction(dry_run):
             if patch_ids or msgids:
+                # The store keeps a patch under a project it has synced
+                if unsynced := [name for name in syncs if not Project.get_or_none(name=name)]:
+                    raise Error(
+                        f"{', '.join(unsynced)}: never synced, "
+                        "run without --patch-id or --msgid first"
+                    )
                 patches = find_patches(syncs, patch_ids, msgids)
                 with open_notmuch(config) as db, db.atomic():
                     for sync, patch in patches:

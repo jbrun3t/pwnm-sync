@@ -7,7 +7,7 @@ import peewee
 
 from . import Error
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 database = peewee.SqliteDatabase(None, pragmas={"foreign_keys": 1})
 
@@ -28,6 +28,14 @@ class User(BaseModel):
     username = peewee.TextField(unique=True)
 
 
+class Project(BaseModel):
+    """The newest patch and event of a project already read: later runs read what follows."""
+
+    name = peewee.TextField(primary_key=True)
+    patch = peewee.IntegerField()
+    event = peewee.IntegerField()
+
+
 class Patch(BaseModel):
     """A synced patch and the values both sides agreed on at the end of the last run.
 
@@ -36,19 +44,11 @@ class Patch(BaseModel):
     """
 
     id = peewee.IntegerField(primary_key=True)  # patchwork's patch id
-    project = peewee.TextField(index=True)
+    project = peewee.ForeignKeyField(Project)
     msgid = peewee.TextField()
     state = peewee.TextField()
     delegate = peewee.ForeignKeyField(User, null=True)
     tagged = peewee.BooleanField()
-
-
-class Project(BaseModel):
-    """The newest patch and event of a project already read: later runs read what follows."""
-
-    name = peewee.TextField(primary_key=True)
-    patch = peewee.IntegerField()
-    event = peewee.IntegerField()
 
 
 def open_store(path: str, *, dry_run: bool = False) -> None:
@@ -68,7 +68,7 @@ def open_store(path: str, *, dry_run: bool = False) -> None:
                 f"{path}: holds schema version {version}, not {SCHEMA_VERSION}; "
                 "delete it to start over"
             )
-        database.create_tables([User, Patch, Project])
+        database.create_tables([User, Project, Patch])
         database.pragma("user_version", SCHEMA_VERSION)
     except (OSError, peewee.PeeweeException) as e:
         raise StoreError(f"{path}: {e}") from e
