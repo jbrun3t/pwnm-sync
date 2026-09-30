@@ -126,11 +126,9 @@ class ProjectSync:
         if first:
             self.client.project()  # a misspelt project would list nothing, silently
             # Read before the patches, so the next run replays what moves meanwhile
-            cursors = Project(
-                name=self.project,
-                patch=newest_id(self.client.patches(order="-id", per_page=1)),
-                event=newest_id(self.client.events(per_page=1)),
-            )
+            event = newest_id(self.client.events(per_page=1))
+            patch = newest_id(self.client.patches(order="-id", per_page=1))
+            cursors = Project(name=self.project, patch=patch, event=event)
             since = epoch or datetime.datetime.now(datetime.UTC) - WINDOW
             listed = list(self.client.patches(since=since))
             events = []
