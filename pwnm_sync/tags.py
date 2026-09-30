@@ -2,8 +2,6 @@
 
 import click
 
-DELEGATE = "delegate-"
-
 
 class Tags:
     """Reads and writes one project's tags, under the user's aliases."""
@@ -12,41 +10,62 @@ class Tags:
         self.config = config
         # The tag telling a message is a patch of the project, which names its other tags
         self.prefix = config.prefixes.get(project, f"pw-{project}")
-        self.canonical = {alias: tag for tag, alias in config.aliases.items()}
-
-    def _ours(self, msg):
-        """The message's tags under our names; our name for a tag with an alias is a user tag."""
-        return {
-            self.canonical.get(t, t)
-            for t in msg.tags
-            if t in self.canonical or t not in self.config.aliases
+        # A delegate tag is this, followed by the username
+        self.delegate = f"{self.prefix}-delegate-"
+        # [Aliases] reversed: each new name to its old one, and each old name to None, a tag
+        # left under its old name being the user's
+        self.to_patchwork = {old: None for old in config.aliases} | {
+            new: old for old, new in config.aliases.items()
         }
+
+    def patchwork_to_notmuch(self, tag):
+        """The tag under its [Aliases] name, if renamed."""
+        return self.config.aliases.get(tag, tag)
+
+    def notmuch_to_patchwork(self, tag):
+        """The tag under its name before [Aliases], None for one left under an old name."""
+        return self.to_patchwork.get(tag, tag)
+
+    def state_to_tag(self, state):
+        """The tag of a state, None for a state that gets no tag."""
+        if state not in self.config.states:
+            return None
+        return self.patchwork_to_notmuch(f"{self.prefix}-{state}")
+
+    def tag_to_state(self, tag):
+        """The state a tag gives, None for any other tag."""
+        return next((s for s in self.config.states if self.state_to_tag(s) == tag), None)
+
+    def delegate_to_tag(self, username):
+        """The tag of a delegate, None for no delegate."""
+        return self.patchwork_to_notmuch(self.delegate + username) if username else None
+
+    def tag_to_delegate(self, tag):
+        """The username a delegate tag gives, None for any other tag."""
+        name = self.notmuch_to_patchwork(tag)
+        if name and name.startswith(self.delegate):
+            return name.removeprefix(self.delegate)
+        return None
 
     def values(self, msg):
         """The values the message's tags give each field; no delegate tag means no delegate."""
-        tags = self._ours(msg)
-        delegate = f"{self.prefix}-{DELEGATE}"
-        delegates = {t.removeprefix(delegate) for t in tags if t.startswith(delegate)}
         return {
-            "state": {s for s in self.config.states if f"{self.prefix}-{s}" in tags},
-            "delegate": delegates or {None},
+            "state": {s for t in msg.tags if (s := self.tag_to_state(t))},
+            "delegate": {d for t in msg.tags if (d := self.tag_to_delegate(t))} or {None},
         }
 
     def set(self, msg, values):
         """Tag the message with these values, replacing the ones it holds."""
-        tags = self._ours(msg)
-        delegate = f"{self.prefix}-{DELEGATE}"
-        states = {f"{self.prefix}-{s}" for s in self.config.states}
-        want = {"patchwork", self.prefix}
-        if values["state"] in self.config.states:
-            want.add(f"{self.prefix}-{values['state']}")
-        if values["delegate"]:
-            want.add(delegate + values["delegate"])
-        stale = {t for t in tags - want if t in states or t.startswith(delegate)}
+        tags = set(msg.tags)
+        want = {
+            self.patchwork_to_notmuch("patchwork"),
+            self.patchwork_to_notmuch(self.prefix),
+            self.state_to_tag(values["state"]),
+            self.delegate_to_tag(values["delegate"]),
+        } - {None}
+        stale = {t for t in tags - want if self.tag_to_state(t) or self.tag_to_delegate(t)}
 
-        alias = self.config.aliases
-        add = sorted(alias.get(t, t) for t in want - tags)
-        remove = sorted(alias.get(t, t) for t in stale)
+        add, remove = sorted(want - tags), sorted(stale)
         if not add and not remove:
             return
         changes = [f"+{t}" for t in add] + [f"-{t}" for t in remove]
