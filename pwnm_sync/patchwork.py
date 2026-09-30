@@ -75,7 +75,10 @@ class Client:
 
     @staticmethod
     def _value(value: object) -> object:
-        """Spell one query parameter as patchwork expects it: bools lowercase, datetimes as naive UTC."""
+        """Spell one query parameter as patchwork expects it.
+
+        Bools are lowercase, datetimes naive UTC.
+        """
         if isinstance(value, bool):
             return str(value).lower()
         if isinstance(value, datetime.datetime):
@@ -90,9 +93,9 @@ class Client:
         body = e.response.text.strip()[:300] if e.response is not None else ""
         return f"{e}: {body}" if body else str(e)
 
-    def _get(self, url: str) -> requests.Response:
+    def _request(self, method: str, url: str, **kwargs: object) -> requests.Response:
         try:
-            response = self._session.get(url, timeout=DEFAULT_TIMEOUT)
+            response = self._session.request(method, url, timeout=DEFAULT_TIMEOUT, **kwargs)
             response.raise_for_status()
         except requests.RequestException as e:
             raise PwError(self._reason(e)) from e
@@ -103,20 +106,23 @@ class Client:
         query = self._list_params | {k: self._value(v) for k, v in params.items() if v is not None}
         url = f"{self._url}/{path}/?{urlencode(query)}"
         while url:
-            response = self._get(url)
+            response = self._request("GET", url)
             yield from self._decode(response, url)
             url = response.links.get("next", {}).get("url", "")
 
     def _document(self, path: str) -> dict:
         url = f"{self._url}/{path}/"
-        return self._decode(self._get(url), url)
+        return self._decode(self._request("GET", url), url)
 
     @property
     def project_name(self) -> str:
         return self._project
 
     def project(self) -> dict:
-        """Fetch the project, failing when patchwork does not know it: list filters silently match nothing."""
+        """Fetch the project, failing when patchwork does not know it.
+
+        The list filters silently match nothing for a project patchwork does not know.
+        """
         return self._document(f"projects/{self._project}")
 
     def patches(self, **params: object) -> Iterator[dict]:
@@ -139,9 +145,7 @@ class Client:
         if self._dry_run:
             return
 
-        url = f"{self._url}/patches/{id}/"
         try:
-            response = self._session.patch(url, json=fields, timeout=DEFAULT_TIMEOUT)
-            response.raise_for_status()
-        except requests.RequestException as e:
-            raise PwError(f"cannot update {fields}: {self._reason(e)}") from e
+            self._request("PATCH", f"{self._url}/patches/{id}/", json=fields)
+        except PwError as e:
+            raise PwError(f"cannot update {fields}: {e}") from e
