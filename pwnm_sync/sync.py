@@ -82,31 +82,27 @@ def replay(remote, events):
 
 
 def merge(remote, stored, tagged, source=None):
-    """Each field's value to keep, the ones to push to patchwork, and the ambiguous ones.
+    """The tagged values to push to patchwork, and the fields whose tags are ambiguous.
 
-    Each field is reconciled on its own: the side that moved since `stored` wins. Patchwork
-    wins when both sides moved, when nothing is stored, or when the tags give several new
-    values. `source` takes that side's values, whichever side moved.
+    Each field is reconciled on its own from its base, the value both sides last agreed on.
+    The tags win when they moved from it to a single new value and patchwork did not;
+    patchwork keeps its value otherwise. `source` notmuch takes patchwork's values as the
+    base, so any other tagged value wins; `source` patchwork, or nothing stored, pushes
+    nothing.
     """
-    keep, push, ambiguous = {}, {}, {}
+    push, ambiguous = {}, {}
+    if source == "patchwork" or (stored is None and source != "notmuch"):
+        return push, ambiguous
+    base = remote if source == "notmuch" else stored
     for field, values in tagged.items():
-        pw = remote[field]
-        if source == "notmuch":
-            base = pw  # any other value the tags hold is pushed
-        elif source == "patchwork" or stored is None:
-            keep[field] = pw
-            continue
-        else:
-            base = stored[field]
-        moved = values - {base}
-        if pw != base or not moved:
-            keep[field] = pw
-        elif len(moved) == 1:
-            keep[field] = push[field] = moved.pop()
-        else:
-            keep[field] = pw
+        if remote[field] != base[field]:
+            continue  # patchwork moved
+        moved = values - {base[field]}
+        if len(moved) == 1:
+            push[field] = moved.pop()
+        elif moved:
             ambiguous[field] = moved
-    return keep, push, ambiguous
+    return push, ambiguous
 
 
 class ProjectSync:
@@ -198,7 +194,7 @@ class ProjectSync:
             return
 
         stored = row_values(row) if row and row.tagged else None
-        keep, push, ambiguous = merge(remote, stored, self.tags.values(msg), source)
+        push, ambiguous = merge(remote, stored, self.tags.values(msg), source)
         label = f"patch {remote['id']} <{remote['msgid']}>"
         for field, values in ambiguous.items():
             click.echo(f"{label}: {field} tagged {sorted(values, key=str)} - taking patchwork's")
@@ -207,8 +203,8 @@ class ProjectSync:
         if push and not self.push(label, remote, push):
             return
 
-        self.tags.set(msg, keep)
-        agreed = remote | keep
+        agreed = remote | push
+        self.tags.set(msg, agreed)
         if agreed != stored:
             self.save(agreed, tagged=True)
 
