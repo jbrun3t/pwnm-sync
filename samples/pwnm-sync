@@ -1,10 +1,12 @@
 # pwnm-sync configuration: copy to ~/.config/pwnm-sync
 #
 # [Defaults] gives the options their default values, under the option's long
-# name with dashes as underscores. The command line overrides them.
+# name with dashes as underscores. The command line overrides them. states and
+# patchwork_token_command are settings of the file's own, not options.
 
 [Defaults]
-# Patchwork projects to sync, comma separated. Required, here or with -p.
+# Patchwork projects to sync, comma separated. Required, here or with -p,
+# repeated for several.
 project = linux-foo
 
 # Needed to write to patchwork; get it from /user/ on the instance.
@@ -15,11 +17,13 @@ project = linux-foo
 # prints instead.
 #patchwork_token_command = pass show patchwork.kernel.org
 
+# The patchwork instance, 3.1 or later.
 #patchwork_url = https://patchwork.kernel.org
 
 # The notmuch database; the one notmuch is configured with when unset.
 #notmuch_database = ~/.mail
 
+# Where the values both sides last agreed on are kept.
 #syncdb = ~/.local/state/pwnm-sync/pwnm-sync.db
 
 # Patches handled while the notmuch database is held open for writing, and
