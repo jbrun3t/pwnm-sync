@@ -106,6 +106,9 @@ def load_defaults(ctx, param, path):
     settings.aliases = section("Aliases")
     if len(set(settings.aliases.values())) != len(settings.aliases):
         raise click.UsageError("[Aliases] gives the same name to several tags")
+    for option in ctx.command.params:
+        if option.multiple and option.name in defaults:
+            defaults[option.name] = _split(defaults[option.name])
     ctx.default_map = defaults
 
 
