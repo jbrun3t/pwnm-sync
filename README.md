@@ -24,15 +24,17 @@ project = linux-blabla
 patchwork_token = abcdef1234567890
 ```
 
-The instance defaults to patchwork.kernel.org (`patchwork_url` otherwise), and
-the notmuch database to the one notmuch is configured with. The token, from
-your patchwork `/user/` page (or `PWNM_SYNC_TOKEN` in the environment), is only
-needed to write to patchwork, which only accepts writes from the project
-maintainers. `--with-token-cmd` takes it from what a command prints instead,
-e.g. a password manager: the command given, or `patchwork_token_command`. Only
-the file sets `states`, the patch states that get a tag, patchwork.kernel.org's
-by default. The sync database defaults to
-`~/.local/state/pwnm-sync/pwnm-sync.db`; both paths follow the XDG variables.
+Several projects are synced by repeating `-p`, or comma separated in the file:
+`project = linux-foo, linux-bar`. The instance defaults to patchwork.kernel.org
+(`patchwork_url` otherwise), and the notmuch database to the one notmuch is
+configured with. The token, from your patchwork `/user/` page (or
+`PWNM_SYNC_TOKEN` in the environment), is only needed to write to patchwork,
+which only accepts writes from the project maintainers, and only them as
+delegates. `--with-token-cmd` takes it from what a command prints instead, e.g.
+a password manager: the command given, or `patchwork_token_command`. Only the
+file sets `states`, the patch states that get a tag, patchwork.kernel.org's by
+default. The sync database defaults to `~/.local/state/pwnm-sync/pwnm-sync.db`;
+both paths follow the XDG variables.
 
 ## Tags
 
@@ -77,14 +79,16 @@ A patch whose message is not in notmuch yet is tagged once it arrives. A change
 in patchwork to a patch older than the first listing syncs it too, if its
 message is in notmuch.
 
-`--dry-run` prints the changes and writes nothing. `--patch-id` and `--msgid`
-sync only those patches; `--from patchwork|notmuch` forces the direction.
+`--dry-run` prints the changes and writes nothing, so it cannot tell which
+patchwork would refuse. `--patch-id` and `--msgid` sync only those patches, of
+projects synced before; `--from patchwork|notmuch` forces the direction.
 `--epoch DATE` lists the patches since DATE: on the first run instead of the
 last year, afterwards to add older ones.
 
 The sync database keeps every patch it has seen. To start over, or when it was
 written by another version, delete it: the next run rebuilds it, taking
-patchwork's values.
+patchwork's values, and lists the patches of the last year again, or since
+`--epoch`.
 
 ## License
 
