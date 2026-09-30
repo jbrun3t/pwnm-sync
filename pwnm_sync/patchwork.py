@@ -16,8 +16,8 @@ from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
 
 from . import NAME, VERSION, Error
-from .config import Patchwork
 
+API_VERSION = "1.3"
 RETRY = Retry(connect=3, backoff_factor=0.5)
 USER_AGENT = f"{NAME}/{VERSION}"
 DEFAULT_PER_PAGE = 100
@@ -43,17 +43,20 @@ def _in_project(fetch: Callable[..., dict]) -> Callable[..., dict]:
 
 
 class Client:
-    """A session against one patchwork instance."""
+    """A session against one project of a patchwork instance."""
 
     def __init__(
         self,
-        config: Patchwork,
+        url: str,
+        project: str,
         *,
         token: str | None = None,
         dry_run: bool = False,
     ) -> None:
+        """`url` is the instance's, e.g. https://patchwork.kernel.org; `project` its link name."""
         self._dry_run = dry_run
-        self._config = config
+        self._url = f"{url.rstrip('/')}/api/{API_VERSION}"
+        self._project = project
         self._list_params = {"per_page": DEFAULT_PER_PAGE}
 
         self._session = requests.Session()
@@ -98,26 +101,26 @@ class Client:
     def _list(self, path: str, **params: object) -> Iterator[dict]:
         """Yield every entry of a list endpoint, a page at a time."""
         query = self._list_params | {k: self._value(v) for k, v in params.items() if v is not None}
-        url = f"{self._config.url}/{path}/?{urlencode(query)}"
+        url = f"{self._url}/{path}/?{urlencode(query)}"
         while url:
             response = self._get(url)
             yield from self._decode(response, url)
             url = response.links.get("next", {}).get("url", "")
 
     def _document(self, path: str) -> dict:
-        url = f"{self._config.url}/{path}/"
+        url = f"{self._url}/{path}/"
         return self._decode(self._get(url), url)
 
     @property
     def project_name(self) -> str:
-        return self._config.project
+        return self._project
 
     def project(self) -> dict:
         """Fetch the project, failing when patchwork does not know it: list filters silently match nothing."""
-        return self._document(f"projects/{self._config.project}")
+        return self._document(f"projects/{self._project}")
 
     def patches(self, **params: object) -> Iterator[dict]:
-        return self._list("patches", project=self._config.project, **params)
+        return self._list("patches", project=self._project, **params)
 
     @_in_project
     def patch(self, *, id: int) -> dict:
@@ -125,7 +128,7 @@ class Client:
 
     def events(self, **params: object) -> Iterator[dict]:
         """Yield the project's events, newest first."""
-        return self._list("events", project=self._config.project, **params)
+        return self._list("events", project=self._project, **params)
 
     def users(self, **params: object) -> Iterator[dict]:
         """Yield the instance's users; listing them needs a token."""
@@ -136,7 +139,7 @@ class Client:
         if self._dry_run:
             return
 
-        url = f"{self._config.url}/patches/{id}/"
+        url = f"{self._url}/patches/{id}/"
         try:
             response = self._session.patch(url, json=fields, timeout=DEFAULT_TIMEOUT)
             response.raise_for_status()

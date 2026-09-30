@@ -22,12 +22,10 @@ import os
 import click
 
 from . import Error
-from .config import BATCH, CONFIG_FILE, SYNCDB, Config, Patchwork, load_defaults, token_from
+from .config import BATCH, CONFIG_FILE, SYNCDB, Config, load_defaults, token_from
 from .patchwork import Client, PwError
 from .store import database, open_store
 from .sync import ProjectSync, open_notmuch
-
-API_VERSION = "1.3"
 
 
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
@@ -138,7 +136,6 @@ def main(
         raise click.UsageError("--from needs --patch-id or --msgid")
     if epoch and (patch_ids or msgids):
         raise click.UsageError("--epoch does not apply to --patch-id or --msgid")
-    api_url = f"{patchwork_url.rstrip('/')}/api/{API_VERSION}"
     config = Config.from_context(ctx, notmuch=notmuch_database, batch=batch, dry_run=dry_run)
 
     try:
@@ -146,7 +143,7 @@ def main(
             patchwork_token = token_from(ctx, token_command)
         open_store(os.path.expanduser(syncdb), dry_run=dry_run)
         clients = {
-            name: Client(Patchwork(api_url, name), token=patchwork_token, dry_run=dry_run)
+            name: Client(patchwork_url, name, token=patchwork_token, dry_run=dry_run)
             for name in filter(None, (p.strip() for p in project.split(",")))
         }
         syncs = {name: ProjectSync(config, client) for name, client in clients.items()}
