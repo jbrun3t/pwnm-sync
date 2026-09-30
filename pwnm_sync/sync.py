@@ -113,8 +113,6 @@ class ProjectSync:
         self.client = client
         self.project = client.project_name
         self.tags = Tags(config, client.project_name)
-        # Their ids there are profile ids, not the user ids a delegate takes
-        self.maintainers = {user["username"] for user in client.project()["maintainers"]}
 
     def run(self, epoch=None):
         """Sync the stored patches and the ones read since the last run.
@@ -126,6 +124,7 @@ class ProjectSync:
         cursors = Project.get_or_none(Project.name == self.project)
         first = cursors is None
         if first:
+            self.client.project()  # a misspelt project would list nothing, silently
             # Read before the patches, so the next run replays what moves meanwhile
             cursors = Project(
                 name=self.project,
@@ -219,9 +218,6 @@ class ProjectSync:
         """Write the values pushed to patchwork, telling whether it took them."""
         changes = ", ".join(f"{field} {remote[field]} -> {value}" for field, value in push.items())
         click.echo(f"{label}: patchwork {changes}")
-        if push.get("delegate") and push["delegate"] not in self.maintainers:
-            click.echo(f"ERROR {push['delegate']} is not a maintainer of {self.project}")
-            return False
         try:
             fields = dict(push)
             if push.get("delegate"):
