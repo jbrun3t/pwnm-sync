@@ -44,6 +44,19 @@ def row_values(row):
     }
 
 
+def newest_id(entries):
+    return next((e["id"] for e in entries), 0)
+
+
+def after(entries, cursor):
+    """The entries listed newest first down to id `cursor`, oldest first, and the newest id.
+
+    An entry listed twice, as new ones push the pages down, is taken once.
+    """
+    found = {e["id"]: e for e in itertools.takewhile(lambda e: e["id"] > cursor, entries)}
+    return list(reversed(found.values())), max(found, default=cursor)
+
+
 def replay(remote, events):
     """Apply the synced events, oldest first, to the patches of `remote`.
 
@@ -97,10 +110,12 @@ class ProjectSync:
     def __init__(self, config, client):
         self.config = config
         self.client = client
-        self.project = client.project
-        self.tags = Tags(config, client.project)
+        self.project = client.project_name
+        self.tags = Tags(config, client.project_name)
         # Their ids there are profile ids, not the user ids a delegate takes
-        self.maintainers = {user["username"] for user in client.project_data()["maintainers"]}
+        self.maintainers = {user["username"] for user in client.project()["maintainers"]}
+        # Patchwork user ids by username, None for no such user
+        self.user_ids = {}
 
     def run(self, epoch=None):
         """Sync the stored patches and the ones read since the last run.
@@ -115,19 +130,19 @@ class ProjectSync:
             # Read before the patches, so the next run replays what moves meanwhile
             cursors = Project(
                 name=self.project,
-                patch=self.client.newest_patch_id(),
-                event=self.client.newest_event_id(),
+                patch=newest_id(self.client.patches(order="-id", per_page=1)),
+                event=newest_id(self.client.events(per_page=1)),
             )
             since = epoch or datetime.datetime.now(datetime.UTC) - WINDOW
-            listed = list(self.client.patch_list(since=since))
+            listed = list(self.client.patches(since=since))
             events = []
         else:
-            events, cursors.event = self.client.events_after(
-                cursors.event, per_page=self.config.batch
+            events, cursors.event = after(
+                self.client.events(per_page=self.config.batch), cursors.event
             )
-            listed, cursors.patch = self.client.patches_after(cursors.patch)
+            listed, cursors.patch = after(self.client.patches(order="-id"), cursors.patch)
             if epoch:
-                listed += self.client.patch_list(since=epoch)
+                listed += self.client.patches(since=epoch)
 
         rows = {row.id: row for row in Patch.select().where(Patch.project == self.project)}
         remote = {patch_id: row_values(row) for patch_id, row in rows.items()}
@@ -156,7 +171,7 @@ class ProjectSync:
         except LookupError:
             return
         try:
-            patch = self.client.patch_data(patch_id)
+            patch = self.client.patch(id=patch_id)
         except PwError as e:
             click.echo(f"patch {patch_id} <{msgid}>: {e}")
             return
@@ -197,8 +212,22 @@ class ProjectSync:
             click.echo(f"ERROR {push['delegate']} is not a maintainer of {self.project}")
             return False
         try:
-            self.client.update(remote["id"], **push)
+            fields = dict(push)
+            if push.get("delegate"):
+                fields["delegate"] = self.user_id(push["delegate"])
+            self.client.update_patch(id=remote["id"], **fields)
         except PwError as e:
             click.echo(f"ERROR {e}")
             return False
         return True
+
+    def user_id(self, username):
+        """The patchwork id of the user with this username."""
+        if username not in self.user_ids:
+            users = self.client.users(q=username)
+            self.user_ids[username] = next(
+                (user["id"] for user in users if user["username"] == username), None
+            )
+        if self.user_ids[username] is None:
+            raise PwError(f"no patchwork user {username}")
+        return self.user_ids[username]

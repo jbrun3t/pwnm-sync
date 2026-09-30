@@ -174,7 +174,7 @@ def find_patches(clients, patch_ids, msgids):
         errors = []
         for project, client in clients.items():
             try:
-                found.append((project, client.patch_data(patch_id)))
+                found.append((project, client.patch(id=patch_id)))
                 break
             except PwError as e:
                 errors.append(str(e))
@@ -185,7 +185,7 @@ def find_patches(clients, patch_ids, msgids):
         patches = [
             (project, patch)
             for project, client in clients.items()
-            for patch in client.patch_list(msgid=msgid.strip("<>"))
+            for patch in client.patches(msgid=msgid.strip("<>"))
         ]
         if not patches:
             raise Error(f"<{msgid}>: no patch in {', '.join(clients)}")

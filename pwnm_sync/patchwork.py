@@ -7,8 +7,8 @@ See https://patchwork.readthedocs.io/en/stable/api/rest/
 from __future__ import annotations
 
 import datetime
-import itertools
-from collections.abc import Iterator
+import functools
+from collections.abc import Callable, Iterator
 from urllib.parse import urlencode
 
 import requests
@@ -22,12 +22,24 @@ RETRY = Retry(connect=3, backoff_factor=0.5)
 USER_AGENT = f"{NAME}/{VERSION}"
 DEFAULT_PER_PAGE = 100
 DEFAULT_TIMEOUT = 30
-# Leaves the delegate as it is, None clearing it
-KEEP = object()
 
 
 class PwError(Error):
     """The patchwork instance could not be reached, or answered badly."""
+
+
+def _in_project(fetch: Callable[..., dict]) -> Callable[..., dict]:
+    """Refuse a document that belongs to another project than the client's."""
+
+    @functools.wraps(fetch)
+    def checked(self: Client, *args: object, **kwargs: object) -> dict:
+        data = fetch(self, *args, **kwargs)
+        found = (data.get("project") or {}).get("link_name")
+        if found != self.project_name:
+            raise PwError(f"{data['url']}: belongs to project {found!r}, not {self.project_name!r}")
+        return data
+
+    return checked
 
 
 class Client:
@@ -43,8 +55,6 @@ class Client:
         self._dry_run = dry_run
         self._config = config
         self._list_params = {"per_page": DEFAULT_PER_PAGE}
-        # Patchwork user ids by username, None for no such user
-        self._user_ids: dict[str, int | None] = {}
 
         self._session = requests.Session()
         self._session.headers["User-Agent"] = USER_AGENT
@@ -94,91 +104,41 @@ class Client:
             yield from self._decode(response, url)
             url = response.links.get("next", {}).get("url", "")
 
-    @staticmethod
-    def _after(entries: Iterator[dict], cursor: int) -> tuple[list[dict], int]:
-        """The entries listed newest first down to id `cursor`, oldest first, and the newest id.
-
-        An entry listed twice, as new ones push the pages down, is taken once.
-        """
-        found = {e["id"]: e for e in itertools.takewhile(lambda e: e["id"] > cursor, entries)}
-        return list(reversed(found.values())), max(found, default=cursor)
+    def _document(self, path: str) -> dict:
+        url = f"{self._config.url}/{path}/"
+        return self._decode(self._get(url), url)
 
     @property
-    def project(self) -> str:
+    def project_name(self) -> str:
         return self._config.project
 
-    def patch_list(self, **params: object) -> Iterator[dict]:
+    def project(self) -> dict:
+        """Fetch the project, failing when patchwork does not know it: list filters silently match nothing."""
+        return self._document(f"projects/{self._config.project}")
+
+    def patches(self, **params: object) -> Iterator[dict]:
         return self._list("patches", project=self._config.project, **params)
 
-    def event_list(self, **params: object) -> Iterator[dict]:
+    @_in_project
+    def patch(self, *, id: int) -> dict:
+        return self._document(f"patches/{id}")
+
+    def events(self, **params: object) -> Iterator[dict]:
         """Yield the project's events, newest first."""
         return self._list("events", project=self._config.project, **params)
 
-    def newest_patch_id(self) -> int:
-        return next((p["id"] for p in self.patch_list(order="-id", per_page=1)), 0)
+    def users(self, **params: object) -> Iterator[dict]:
+        """Yield the instance's users; listing them needs a token."""
+        return self._list("users", **params)
 
-    def newest_event_id(self) -> int:
-        return next((e["id"] for e in self.event_list(per_page=1)), 0)
-
-    def patches_after(self, patch_id: int) -> tuple[list[dict], int]:
-        """The patches after `patch_id`, oldest first, and the newest id."""
-        return self._after(self.patch_list(order="-id"), patch_id)
-
-    def events_after(self, event_id: int, **params: object) -> tuple[list[dict], int]:
-        """The events after `event_id`, oldest first, and the newest id."""
-        return self._after(self.event_list(**params), event_id)
-
-    def _document(self, path: str) -> dict:
-        """Fetch one document, refusing one that belongs to another project."""
-        url = f"{self._config.url}/{path}/"
-        data = self._decode(self._get(url), url)
-
-        found = (data.get("project") or {}).get("link_name")
-        if found != self._config.project:
-            raise PwError(f"{url}: belongs to project {found!r}, not {self._config.project!r}")
-        return data
-
-    def project_data(self) -> dict:
-        """Fetch the project, failing when patchwork does not know it: list filters silently match nothing."""
-        url = f"{self._config.url}/projects/{self._config.project}/"
-        return self._decode(self._get(url), url)
-
-    def patch_data(self, patch_id: int) -> dict:
-        return self._document(f"patches/{patch_id}")
-
-    def user_id(self, username: str) -> int:
-        """The id of the user with this username; listing users needs a token."""
-        if username not in self._user_ids:
-            users = self._list("users", q=username)
-            self._user_ids[username] = next(
-                (user["id"] for user in users if user["username"] == username), None
-            )
-        if self._user_ids[username] is None:
-            raise PwError(f"no patchwork user {username}")
-        return self._user_ids[username]
-
-    def update(
-        self,
-        patch_id: int,
-        *,
-        state: str | None = None,
-        delegate: str | object | None = KEEP,
-    ) -> None:
-        """Write the settings given on a patch, skipping whatever is None. A dry run writes nothing.
-
-        `delegate` is a username, or None to clear it.
-        """
-        body = {"state": state} if state is not None else {}
-        if delegate is not KEEP:
-            body["delegate"] = self.user_id(delegate) if delegate else None
-        if not body:
-            return
+    def update_patch(self, *, id: int, **fields: object) -> None:
+        """Write these fields on a patch, as patchwork spells them. A dry run writes nothing."""
         if self._dry_run:
             return
 
-        url = f"{self._config.url}/patches/{patch_id}/"
+        url = f"{self._config.url}/patches/{id}/"
         try:
-            response = self._session.patch(url, json=body, timeout=DEFAULT_TIMEOUT)
+            response = self._session.patch(url, json=fields, timeout=DEFAULT_TIMEOUT)
             response.raise_for_status()
         except requests.RequestException as e:
-            raise PwError(f"cannot update {body}: {self._reason(e)}") from e
+            raise PwError(f"cannot update {fields}: {self._reason(e)}") from e
