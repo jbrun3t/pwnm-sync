@@ -5,10 +5,11 @@ import itertools
 
 import click
 import notmuch2
+import peewee
 
 from .config import WINDOW
 from .patchwork import PwError
-from .store import Patch, Project
+from .store import Patch, Project, User
 from .tags import Tags
 
 # The events synced, and the field they change
@@ -22,7 +23,11 @@ def open_notmuch(config):
 
 
 def username(user):
-    return user["username"] if user else None
+    """The username of a user patchwork embeds in a document, recording the user."""
+    if not user:
+        return None
+    User.get_or_create(id=user["id"], defaults={"username": user["username"]})
+    return user["username"]
 
 
 def patch_values(patch):
@@ -40,7 +45,7 @@ def row_values(row):
         "id": row.id,
         "msgid": row.msgid,
         "state": row.state,
-        "delegate": row.delegate,
+        "delegate": row.delegate.username if row.delegate else None,
     }
 
 
@@ -114,8 +119,6 @@ class ProjectSync:
         self.tags = Tags(config, client.project_name)
         # Their ids there are profile ids, not the user ids a delegate takes
         self.maintainers = {user["username"] for user in client.project()["maintainers"]}
-        # Patchwork user ids by username, None for no such user
-        self.user_ids = {}
 
     def run(self, epoch=None):
         """Sync the stored patches and the ones read since the last run.
@@ -144,7 +147,12 @@ class ProjectSync:
             if epoch:
                 listed += self.client.patches(since=epoch)
 
-        rows = {row.id: row for row in Patch.select().where(Patch.project == self.project)}
+        query = (
+            Patch.select(Patch, User)
+            .join(User, peewee.JOIN.LEFT_OUTER)
+            .where(Patch.project == self.project)
+        )
+        rows = {row.id: row for row in query}
         remote = {patch_id: row_values(row) for patch_id, row in rows.items()}
         for patch in listed:
             remote[patch["id"]] = patch_values(patch)
@@ -186,7 +194,7 @@ class ProjectSync:
         try:
             msg = db.find(remote["msgid"])
         except LookupError:
-            Patch.replace(project=self.project, tagged=False, **remote).execute()
+            self.save(remote, tagged=False)
             return
 
         stored = row_values(row) if row and row.tagged else None
@@ -202,7 +210,14 @@ class ProjectSync:
         self.tags.set(msg, keep)
         agreed = remote | keep
         if agreed != stored:
-            Patch.replace(project=self.project, tagged=True, **agreed).execute()
+            self.save(agreed, tagged=True)
+
+    def save(self, values, tagged):
+        """Store a patch's values; its delegate was recorded as a user when read or pushed."""
+        delegate = values["delegate"] and User.get(User.username == values["delegate"])
+        Patch.replace(
+            project=self.project, tagged=tagged, **values | {"delegate": delegate}
+        ).execute()
 
     def push(self, label, remote, push):
         """Write the values pushed to patchwork, telling whether it took them."""
@@ -214,20 +229,26 @@ class ProjectSync:
         try:
             fields = dict(push)
             if push.get("delegate"):
-                fields["delegate"] = self.user_id(push["delegate"])
+                user = self.user(push["delegate"])
+                if user is None:
+                    click.echo(f"ERROR no patchwork user {push['delegate']}")
+                    return False
+                fields["delegate"] = user.id
             self.client.update_patch(id=remote["id"], **fields)
         except PwError as e:
             click.echo(f"ERROR {e}")
             return False
         return True
 
-    def user_id(self, username):
-        """The patchwork id of the user with this username."""
-        if username not in self.user_ids:
+    def user(self, username):
+        """The user with this username, asked of patchwork when not stored; None for no such user.
+
+        Listing users needs a token.
+        """
+        user = User.get_or_none(User.username == username)
+        if user is None:
             users = self.client.users(q=username)
-            self.user_ids[username] = next(
-                (user["id"] for user in users if user["username"] == username), None
-            )
-        if self.user_ids[username] is None:
-            raise PwError(f"no patchwork user {username}")
-        return self.user_ids[username]
+            found = next((u for u in users if u["username"] == username), None)
+            if found is not None:
+                user = User.create(id=found["id"], username=username)
+        return user

@@ -6,13 +6,23 @@ import peewee
 
 from . import Error
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
-database = peewee.SqliteDatabase(None)
+database = peewee.SqliteDatabase(None, pragmas={"foreign_keys": 1})
 
 
 class StoreError(Error):
     """The store was written by another schema version."""
+
+
+class User(peewee.Model):
+    """A patchwork user: tags name a delegate by username, patchwork takes its user id."""
+
+    id = peewee.IntegerField(primary_key=True)  # patchwork's user id
+    username = peewee.TextField(unique=True)
+
+    class Meta:
+        database = database
 
 
 class Patch(peewee.Model):
@@ -26,7 +36,7 @@ class Patch(peewee.Model):
     project = peewee.TextField(index=True)
     msgid = peewee.TextField()
     state = peewee.TextField()
-    delegate = peewee.TextField(null=True)  # patchwork username
+    delegate = peewee.ForeignKeyField(User, null=True)
     tagged = peewee.BooleanField()
 
     class Meta:
@@ -58,5 +68,5 @@ def open_store(path: str, *, dry_run: bool = False) -> None:
         raise StoreError(
             f"{path}: holds schema version {version}, not {SCHEMA_VERSION}; delete it to start over"
         )
-    database.create_tables([Patch, Project])
+    database.create_tables([User, Patch, Project])
     database.pragma("user_version", SCHEMA_VERSION)
