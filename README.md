@@ -4,8 +4,12 @@ Sync patch state between patchwork and notmuch tags, both ways.
 
 ## Install
 
-Needs Python 3.12+, a patchwork 3.1+ instance (REST API 1.3), and the notmuch
-headers (`libnotmuch-dev` on Debian) to build the `notmuch2` bindings.
+Needs:
+
+- Python 3.12+
+- a patchwork 3.1+ instance (REST API 1.3)
+- the notmuch headers (`libnotmuch-dev` on Debian), to build the `notmuch2`
+  bindings
 
 ```
 python3 -m venv .venv
@@ -15,26 +19,29 @@ python3 -m venv .venv
 
 ## Configure
 
-Options (see `pwnm-sync --help`) default from the `[Defaults]` section of
-`~/.config/pwnm-sync`; `samples/pwnm-sync` lists every setting:
+Every option (see `pwnm-sync --help`) takes its default from the `[Defaults]`
+section of `~/.config/pwnm-sync`. `samples/pwnm-sync` lists every setting.
 
 ```
 [Defaults]
-project = linux-blabla
+project = linux-foo, linux-bar
 patchwork_token = abcdef1234567890
 ```
 
-Several projects are synced by repeating `-p`, or comma separated in the file:
-`project = linux-foo, linux-bar`. The instance defaults to patchwork.kernel.org
-(`patchwork_url` otherwise), and the notmuch database to the one notmuch is
-configured with. The token, from your patchwork `/user/` page (or
-`PWNM_SYNC_TOKEN` in the environment), is only needed to write to patchwork,
-which only accepts writes from the project maintainers, and only them as
-delegates. `--with-token-cmd` takes it from what a command prints instead, e.g.
-a password manager: the command given, or `patchwork_token_command`. Only the
-file sets `states`, the patch states that get a tag, patchwork.kernel.org's by
-default. The sync database defaults to `~/.local/state/pwnm-sync/pwnm-sync.db`;
-both paths follow the XDG variables.
+- **Projects**: required. Comma separated in the file, or `-p` repeated.
+- **Instance**: patchwork.kernel.org, unless `patchwork_url` says otherwise.
+- **Token**: only needed to write to patchwork, which only accepts writes from
+  the project's maintainers, and only as delegates. Get it from your patchwork
+  `/user/` page. Also taken from:
+  - `PWNM_SYNC_TOKEN` in the environment
+  - `--with-token-cmd`: the first line a command prints (e.g. a password
+    manager), the command given or `patchwork_token_command`
+- **States**: the patch states that get a tag, patchwork.kernel.org's by
+  default. Only settable in the file.
+- **Notmuch database**: the one notmuch is configured with.
+- **Sync database**: `~/.local/state/pwnm-sync/pwnm-sync.db`.
+
+Both default paths follow the XDG variables.
 
 ## Tags
 
@@ -44,9 +51,10 @@ both paths follow the XDG variables.
 | `pw-{project}-{state}` | its state, if among the configured `states` |
 | `pw-{project}-delegate-{user}` | delegated to that maintainer |
 
-In the configuration file, an optional `[Prefixes]` section names a project's
-tags after another prefix than `pw-{project}`, and an optional `[Aliases]`
-section renames single tags, by their names after the prefix change:
+Two optional sections of the configuration file rename them:
+
+- `[Prefixes]`: a project's tags use another prefix than `pw-{project}`
+- `[Aliases]`: single tags, by their name after the prefix change
 
 ```
 [Prefixes]
@@ -57,13 +65,14 @@ patchwork = pw
 pw-foo-accepted = foo/applied
 ```
 
-Only the new names are synced then; tags left under their old names are yours.
+Only the new names are synced; tags left under their old names are yours.
 
 ## Sync
 
-The first run of a project lists its patches from the last year, archived or
-not. Later runs read what patchwork logged since: the state and delegate
-changes, and the new patches. Archiving is not logged, so it is not synced.
+- **First run** of a project: lists its patches from the last year, archived
+  or not.
+- **Later runs**: read what patchwork logged since, i.e. state and delegate
+  changes, and new patches. Archiving is not logged, so it is not synced.
 
 For each field (state, delegate), the sync database keeps the value both sides
 last agreed on:
@@ -79,16 +88,20 @@ A patch whose message is not in notmuch yet is tagged once it arrives. A change
 in patchwork to a patch older than the first listing syncs it too, if its
 message is in notmuch.
 
-`--dry-run` prints the changes and writes nothing, so it cannot tell which
-patchwork would refuse. `--patch-id` and `--msgid` sync only those patches, of
-projects synced before; `--from patchwork|notmuch` forces the direction.
-`--epoch DATE` lists the patches since DATE: on the first run instead of the
-last year, afterwards to add older ones.
+### Options
 
-The sync database keeps every patch it has seen. To start over, or when it was
-written by another version, delete it: the next run rebuilds it, taking
-patchwork's values, and lists the patches of the last year again, or since
-`--epoch`.
+- `--dry-run`: print the changes, write nothing. It cannot tell which writes
+  patchwork would refuse.
+- `--patch-id`, `--msgid`: sync only those patches, of projects synced before.
+- `--from patchwork|notmuch`: with the above, force the direction.
+- `--epoch DATE`: list the patches since DATE; on the first run instead of the
+  last year, afterwards to add older ones.
+
+### Starting over
+
+The sync database keeps every patch it has seen. Delete it to start over, or
+when another version wrote it. The next run rebuilds it from patchwork's
+values, listing the patches of the last year again, or since `--epoch`.
 
 ## License
 
